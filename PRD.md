@@ -18,7 +18,7 @@ The agent combines:
 - Configurable GPT-5.6 Luna, Terra, and Sol model profiles.
 - PostgreSQL for raw conversation state, job coordination, auditability, approvals, and restart recovery.
 - Supermemory for durable semantic facts and user profile recall.
-- Render for one-click infrastructure provisioning and a private post-deploy ChatGPT device-login step.
+- Railway for one-click infrastructure provisioning and a private post-deploy ChatGPT device-login step.
 
 The first release is deliberately **single-owner and private**. A public multi-tenant agent would require a different authentication, credential-isolation, billing, abuse-prevention, and worker architecture.
 
@@ -46,7 +46,7 @@ The goal is not to reproduce Poke’s proprietary service, prompts, integrations
 
 ### Primary: technical individual owner
 
-A developer or technical founder who wants a private agent reachable through iMessage and is comfortable owning a Photon, Render, Supermemory, and ChatGPT/OpenAI account.
+A developer or technical founder who wants a private agent reachable through iMessage and is comfortable owning a Photon, Railway, Supermemory, and ChatGPT/OpenAI account.
 
 **Jobs to be done**
 
@@ -74,7 +74,7 @@ A team that wants to fork the starter for a customer or employee use case and ad
 3. **Fast acknowledgement, durable completion.** Long work gets a useful early status message and a reliable final answer.
 4. **The model is not the security boundary.** Authorization, confirmations, deduplication, and sender routing live in code.
 5. **Raw state and semantic memory are separate.** PostgreSQL is the operational source of truth; Supermemory stores selected durable facts.
-6. **No silent degradation.** Missing auth, unsupported model effort, broken memory, or an invalid Blueprint must fail with an actionable error.
+6. **No silent degradation.** Missing auth, unsupported model effort, broken memory, or invalid deployment configuration must fail with an actionable error.
 7. **Small enough to learn.** Use one service and concrete modules before introducing distributed infrastructure.
 8. **Primary docs over guessed APIs.** Every integration points to official, Markdown-first documentation.
 
@@ -82,11 +82,11 @@ A team that wants to fork the starter for a customer or employee use case and ad
 
 ### Journey A: first deployment
 
-1. User forks the repository or clicks Deploy to Render.
-2. Render creates the web service, PostgreSQL database, and persistent disk.
+1. User connects the repository to a Railway application service.
+2. User creates one Railway application service, one PostgreSQL 18 service, and one persistent volume.
 3. User supplies Photon credentials, Supermemory key, and authorized owner handles.
 4. Service starts but `/readyz` reports `codex_auth_missing`.
-5. User opens the private Render shell and runs `npm run codex:login`.
+5. User opens Railway SSH and runs `npm run codex:login`.
 6. Codex displays a device code; user completes ChatGPT sign-in in a browser.
 7. User runs `npm run codex:status` and restarts the service.
 8. `/readyz` becomes healthy.
@@ -263,7 +263,7 @@ Commands are parsed in code before the model.
 ### 9.11 Health and observability
 
 - `/healthz`: process liveness only; no secrets or dependency details.
-- `/readyz`: database, migrations, pg-boss, Spectrum connection, Codex auth/capability probe, persistent disk, and required Supermemory configuration.
+- `/readyz`: database, migrations, pg-boss, Spectrum connection, Codex auth/capability probe, persistent volume, and required Supermemory configuration.
 - Structured logs with correlation IDs for message, chain, task, job, and outbound batch.
 - Redact sender handles, message bodies, secrets, authorization tokens, and Codex credentials by default.
 - Track latency, task success, cancellation, retries, model profile, token usage where available, memory hits, and approval outcomes.
@@ -294,7 +294,7 @@ Targets apply after the inbound debounce window:
 - p95 acknowledgement/status message: under 3 seconds for delegated work.
 - p50 simple response: under 20 seconds.
 - p95 queue pickup: under 2 seconds when capacity is available.
-- p95 database write: under 250 ms from the Render region.
+- p95 database write: under 250 ms from the Railway region.
 - Long work status cadence: no more than one useful update every 45–90 seconds; never spam progress.
 - Per-owner concurrency: default 3 execution tasks; configurable.
 
@@ -321,7 +321,7 @@ These are launch targets, not promises about third-party model or transport late
 - Model profile routing.
 - PostgreSQL state, pg-boss queue, restart recovery.
 - Supermemory recall/write/delete.
-- Local and Render deployment.
+- Local and Railway deployment.
 - ChatGPT device auth or API-key auth.
 - Commands, cancellation, approval gates, health, logging, tests, and complete docs.
 
@@ -351,7 +351,7 @@ These are launch targets, not promises about third-party model or transport late
 - A new generic agent protocol.
 - Apple Messages for Business certification.
 - Unrestricted shell/network execution.
-- Horizontal scaling of the disk-backed Codex process.
+- Horizontal scaling of the volume-backed Codex process.
 - Full Poke integration parity.
 
 ## 12. Success metrics
@@ -388,7 +388,7 @@ These are launch targets, not promises about third-party model or transport late
 
 The public template must not launch until:
 
-1. A clean Render deployment guide has been executed end-to-end by someone who did not write it.
+1. A clean Railway deployment guide has been executed end-to-end by someone who did not write it.
 2. Unauthorized sender tests pass before the Codex call boundary.
 3. Kill-during-generation and kill-during-send tests recover correctly.
 4. Stable client GUID and send-cursor tests produce no duplicate user-visible bubbles.
@@ -396,7 +396,7 @@ The public template must not launch until:
 6. The configured model/effort capability probe passes on the pinned Codex version.
 7. Secret-scanning finds no credentials or user message fixtures.
 8. Logs remain useful with message text redaction enabled.
-9. Render Blueprint validation passes.
+9. Railway configuration unit and official-schema validation pass.
 10. Primary documentation links have been rechecked against current releases.
 
 ## 14. Open questions that do not block the PRD

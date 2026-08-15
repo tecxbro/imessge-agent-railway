@@ -10,9 +10,9 @@
 
 ## ADR-002 — PostgreSQL is the default operational store
 
-**Decision:** use Render PostgreSQL, Drizzle, and pg-boss.
+**Decision:** use Railway PostgreSQL, Drizzle, and pg-boss.
 
-**Why:** Render can provision and wire the database in the same Blueprint; one system can own transcript, identities, queues, approvals, idempotency, and audit data.
+**Why:** Railway can host and privately wire the database in the same project; one system can own transcript, identities, queues, approvals, idempotency, and audit data.
 
 **Rejected:** Convex as default. It is technically viable but requires a separate project/deployment flow, weakening one-click installation. See `CONVEX_VARIANT.md`.
 
@@ -34,7 +34,7 @@
 
 ## ADR-005 — ChatGPT login is deployment enrollment, not web OAuth
 
-**Decision:** the operator runs Codex device auth once in the private local/Render environment; API-key mode is the automation alternative.
+**Decision:** the operator runs Codex device auth once in the private local/Railway environment; API-key mode is the automation alternative.
 
 **Why:** Codex SDK wraps the CLI and uses local credential/session state. The starter should represent this accurately.
 
@@ -46,11 +46,11 @@
 
 **Why:** preserves the starter’s teachability and one-service deployment while durable jobs make later worker separation possible.
 
-**Rejected:** multiple Render services, Redis, and distributed workers in v1.
+**Rejected:** multiple application services, Redis, and distributed workers in v1.
 
-## ADR-007 — Persistent disk for Codex state and workspaces
+## ADR-007 — Persistent volume for Codex state and workspaces
 
-**Decision:** mount one Render disk and set `CODEX_HOME` plus workspace root under it.
+**Decision:** mount one Railway volume and set `CODEX_HOME` plus workspace root under it.
 
 **Why:** ChatGPT credentials and Codex sessions must survive restart; workspaces may contain task artifacts.
 

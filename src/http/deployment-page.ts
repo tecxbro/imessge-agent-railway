@@ -87,13 +87,13 @@ function renderAuthenticationStep(options: DeploymentPageOptions): string {
   if (options.authMode === "api_key") {
     return `<li>
       <strong>OpenAI API-key mode</strong>
-      <span>Confirm <code>OPENAI_API_KEY</code> is set as a private Render secret. The value is never shown here.</span>
+      <span>Confirm <code>OPENAI_API_KEY</code> is set as a Railway service variable. The value is never shown here.</span>
     </li>`;
   }
 
   return `<li>
     <strong>Connect ChatGPT</strong>
-    <span>Open the private Render Shell, run <code>npm run codex:login</code>, complete the device-code flow, then run <code>npm run codex:status</code> and restart the service.</span>
+    <span>Open a Railway SSH session with <code>railway ssh</code>, run <code>npm run codex:login</code>, complete the device-code flow, then run <code>npm run codex:status</code> and restart the service.</span>
   </li>`;
 }
 
@@ -116,7 +116,7 @@ export function renderDeploymentPage(
   const summary = trulyReady
     ? "Spectrum, Codex, PostgreSQL, and the durable pipeline report ready. Send a message only from an authorized owner handle."
     : foundationOnly
-      ? "This deployment is running the foundation health process, not the composed message pipeline. Do not treat Render's Live badge as first-message acceptance."
+      ? "This deployment is running the foundation health process, not the composed message pipeline. Do not treat Railway service status as first-message acceptance."
       : "Complete the operator-only steps below. The service stays live while enrollment is incomplete, but message execution remains paused.";
   const components = Object.entries(snapshot.components) as Array<
     [ReadinessComponent, ComponentReadiness]
@@ -292,12 +292,12 @@ export function renderDeploymentPage(
           <ol class="steps">
             <li>
               <strong>Configure Photon Spectrum</strong>
-              <span>The Render Blueprint collects the project ID, project secret, and authorized owner handles before provisioning.</span>
+              <span>Set the project ID, project secret, and authorized owner handles as Railway service variables before deployment.</span>
             </li>
             ${renderAuthenticationStep(options)}
             <li>
               <strong>Supermemory ${options.supermemoryConfigured ? "configured" : "not configured"}</strong>
-              <span>${options.supermemoryConfigured ? "The key is present as a private Render secret; its value is never displayed." : "Add SUPERMEMORY_API_KEY in Render and restart, or intentionally leave semantic memory disabled."}</span>
+              <span>${options.supermemoryConfigured ? "The key is present as a Railway service variable; its value is never displayed." : "Add SUPERMEMORY_API_KEY in Railway and restart, or intentionally leave semantic memory disabled."}</span>
             </li>
             <li>
               <strong>Require agent readiness</strong>

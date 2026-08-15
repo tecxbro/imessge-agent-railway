@@ -5,7 +5,7 @@
   "description": "Production-oriented private iMessage agent starter powered by Spectrum and Codex",
   "type": "module",
   "engines": {
-    "node": "^22.12.0 || >=24.0.0"
+    "node": "22.12.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -22,7 +22,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "codex:login": "codex login --device-auth",
     "codex:status": "codex login status",
-    "render:validate": "render blueprints validate render.yaml"
+    "railway:validate": "vitest run test/unit/railway-config.test.ts"
   },
   "dependencies": {
     "@openai/codex": "0.147.0",

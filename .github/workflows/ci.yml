@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - feat/render-docs
 
 permissions:
   contents: read
@@ -14,6 +13,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: imessage_agent_test
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent -d imessage_agent_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -25,15 +38,19 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run test:security
       - run: npm run test:integration
+        env:
+          POSTGRES_PIPELINE_TEST_DATABASE_URL: postgresql://agent:test-only-password@127.0.0.1:5432/imessage_agent_test
       - run: npm run test:chaos
       - run: npm run build
+      - run: npm run railway:validate
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Validate Render Blueprint against the official schema
+      - name: Validate Railway configuration against the official schema
         run: |
           python -m pip install check-jsonschema==0.38.0
-          check-jsonschema --schemafile https://render.com/schema/render.yaml.json render.yaml
+          check-jsonschema --schemafile https://railway.com/railway.schema.json railway.json

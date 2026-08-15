@@ -26,16 +26,16 @@
 - [Operations runbook](./OPERATIONS.md)
 - [Security and privacy](../SECURITY_AND_PRIVACY.md)
 - [Test plan](../TEST_PLAN.md)
-- [Render smoke evidence checklist](../test/e2e/render-smoke.md)
-- [Render Blueprint](../render.yaml)
+- [Railway smoke evidence checklist](../test/e2e/railway-smoke.md)
+- [Railway service configuration](../railway.json)
 - [Primary external documentation index](../DOCS_INDEX.md)
 
 ## Implementation entrypoints
 
-- [`src/index.ts`](../src/index.ts) — injectable boot/readiness/shutdown composition; not yet wired to the production start command on `feat/render-docs`
-- [`src/server.ts`](../src/server.ts) — current foundation production entrypoint; health/readiness shell only, never operationally ready
+- [`src/index.ts`](../src/index.ts) — injectable boot/readiness/shutdown composition
+- [`src/server.ts`](../src/server.ts) — composed production entrypoint used by `npm start`
 - [`src/http/server.ts`](../src/http/server.ts) — composed `/healthz` and `/readyz` handlers
-- [`src/runtime/persistent-storage.ts`](../src/runtime/persistent-storage.ts) — Codex and workspace disk policy
+- [`src/runtime/persistent-storage.ts`](../src/runtime/persistent-storage.ts) — Codex and workspace volume policy
 - [`src/runtime/graceful-shutdown.ts`](../src/runtime/graceful-shutdown.ts) — bounded stop hooks
 - [`src/db/migrate.ts`](../src/db/migrate.ts) — migration command
 
@@ -43,7 +43,7 @@
 
 - [OpenAI Codex](https://learn.chatgpt.com/docs/llms.txt)
 - [Photon Spectrum](https://photon.codes/docs/llms.txt)
-- [Render](https://render.com/docs/llms.txt)
+- [Railway](https://docs.railway.com/llms.txt)
 - [Supermemory](https://supermemory.ai/docs/llms.txt)
 - [Drizzle ORM](https://orm.drizzle.team/llms.txt)
 - [PostgreSQL](https://www.postgresql.org/docs/)

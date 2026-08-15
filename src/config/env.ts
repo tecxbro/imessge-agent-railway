@@ -103,6 +103,45 @@ const protectedPathSchema = (label: string) =>
       `${label} must not resolve to a filesystem root`,
     );
 
+const railwayIdentifierSchema = (label: string) =>
+  optionalText(
+    z
+      .string()
+      .trim()
+      .min(1)
+      .max(256)
+      .regex(/^[a-zA-Z0-9_-]+$/u, `${label} is malformed`),
+  );
+
+const railwayVolumeMountPathSchema = optionalText(
+  z
+    .string()
+    .trim()
+    .refine(isAbsolute, "RAILWAY_VOLUME_MOUNT_PATH must be absolute")
+    .refine(
+      (value) => !value.includes("\0"),
+      "RAILWAY_VOLUME_MOUNT_PATH contains an invalid null byte",
+    )
+    .refine(
+      (value) => !value.split(/[\\/]+/u).includes(".."),
+      "RAILWAY_VOLUME_MOUNT_PATH must not contain parent-directory traversal",
+    )
+    .transform((value) => resolve(value))
+    .refine(
+      (value) => value !== parse(value).root,
+      "RAILWAY_VOLUME_MOUNT_PATH must not resolve to a filesystem root",
+    ),
+);
+
+function isStrictDescendant(parent: string, child: string): boolean {
+  const pathFromParent = relative(parent, child);
+  return (
+    pathFromParent !== "" &&
+    !pathFromParent.startsWith("..") &&
+    !isAbsolute(pathFromParent)
+  );
+}
+
 const encryptionKeySchema = requiredText("APP_ENCRYPTION_KEY").refine((value) => {
   if (/^[a-f0-9]{64}$/i.test(value)) {
     return true;
@@ -224,6 +263,10 @@ const rawEnvironmentSchema = z
       .enum(["disabled", "owner_mentions_only"])
       .default("owner_mentions_only"),
     LOG_MESSAGE_CONTENT: booleanFromEnvironment("LOG_MESSAGE_CONTENT", false),
+
+    RAILWAY_SERVICE_ID: railwayIdentifierSchema("RAILWAY_SERVICE_ID"),
+    RAILWAY_DEPLOYMENT_ID: railwayIdentifierSchema("RAILWAY_DEPLOYMENT_ID"),
+    RAILWAY_VOLUME_MOUNT_PATH: railwayVolumeMountPathSchema,
   })
   .superRefine((environment, context) => {
     if (
@@ -272,6 +315,40 @@ const rawEnvironmentSchema = z
           "AGENT_WORKSPACE_ROOT and CODEX_HOME must be separate, non-overlapping paths",
       });
     }
+
+    const railwayRuntime =
+      environment.RAILWAY_SERVICE_ID !== undefined ||
+      environment.RAILWAY_DEPLOYMENT_ID !== undefined ||
+      environment.RAILWAY_VOLUME_MOUNT_PATH !== undefined;
+
+    if (railwayRuntime && environment.RAILWAY_VOLUME_MOUNT_PATH === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["RAILWAY_VOLUME_MOUNT_PATH"],
+        message:
+          "RAILWAY_VOLUME_MOUNT_PATH is required when Railway runtime variables are present",
+      });
+    }
+
+    if (environment.RAILWAY_VOLUME_MOUNT_PATH !== undefined) {
+      for (const [pathName, protectedPath] of [
+        ["CODEX_HOME", environment.CODEX_HOME],
+        ["AGENT_WORKSPACE_ROOT", environment.AGENT_WORKSPACE_ROOT],
+      ] as const) {
+        if (
+          !isStrictDescendant(
+            environment.RAILWAY_VOLUME_MOUNT_PATH,
+            protectedPath,
+          )
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: [pathName],
+            message: `${pathName} must be under RAILWAY_VOLUME_MOUNT_PATH on Railway`,
+          });
+        }
+      }
+    }
   });
 
 export type Environment = z.infer<typeof rawEnvironmentSchema>;
@@ -318,20 +395,21 @@ function loadLocalEnvironmentFile(): void {
 }
 
 /**
- * Render injects a stable service ID, but Blueprint generated values are not
- * UUIDs. Derive the internal deployment UUID without prompting for another
- * value or exposing a provider identifier to memory namespaces.
+ * Railway injects a stable service ID that is not an application UUID. Derive
+ * the internal deployment UUID for brand-new installations without exposing a
+ * provider identifier to memory namespaces. Migrated installations configure
+ * DEPLOYMENT_ID explicitly so their existing identity always wins.
  */
-export function deploymentIdFromRenderServiceId(serviceId: string): string {
+export function deploymentIdFromRailwayServiceId(serviceId: string): string {
   const normalized = z
     .string()
     .trim()
     .min(1)
     .max(256)
-    .regex(/^[a-zA-Z0-9_-]+$/u)
+    .regex(/^[a-zA-Z0-9_-]+$/u, "RAILWAY_SERVICE_ID is malformed")
     .parse(serviceId);
   const digest = createHash("sha256")
-    .update(`imessage-codex-agent:render:${normalized}`, "utf8")
+    .update(`imessage-codex-agent:railway:${normalized}`, "utf8")
     .digest();
   digest[6] = (digest[6]! & 0x0f) | 0x50;
   digest[8] = (digest[8]! & 0x3f) | 0x80;
@@ -345,17 +423,17 @@ export function deploymentIdFromRenderServiceId(serviceId: string): string {
   ].join("-");
 }
 
-function withRenderDeploymentId(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function withRailwayDeploymentId(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (
     (source["DEPLOYMENT_ID"] === undefined ||
       source["DEPLOYMENT_ID"]?.trim() === "") &&
-    source["RENDER_SERVICE_ID"] !== undefined &&
-    source["RENDER_SERVICE_ID"].trim() !== ""
+    source["RAILWAY_SERVICE_ID"] !== undefined &&
+    source["RAILWAY_SERVICE_ID"].trim() !== ""
   ) {
     return {
       ...source,
-      DEPLOYMENT_ID: deploymentIdFromRenderServiceId(
-        source["RENDER_SERVICE_ID"],
+      DEPLOYMENT_ID: deploymentIdFromRailwayServiceId(
+        source["RAILWAY_SERVICE_ID"],
       ),
     };
   }
@@ -368,7 +446,7 @@ export function loadEnvironment(source?: NodeJS.ProcessEnv): Environment {
   }
 
   const result = rawEnvironmentSchema.safeParse(
-    withRenderDeploymentId(source ?? process.env),
+    withRailwayDeploymentId(source ?? process.env),
   );
 
   if (!result.success) {

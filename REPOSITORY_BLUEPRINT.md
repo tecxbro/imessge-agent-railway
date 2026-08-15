@@ -12,7 +12,7 @@ imessage-codex-agent-boilerplate/
 ├── SECURITY.md
 ├── package.json
 ├── package-lock.json
-├── render.yaml
+├── railway.json
 ├── tsconfig.json
 ├── drizzle.config.ts
 ├── docs/
@@ -274,4 +274,4 @@ All interfaces are backed by runtime schemas in `src/agent/schemas.ts` and `src/
 | No database | PostgreSQL + Drizzle + pg-boss |
 | No agent | Codex interaction and execution runtimes |
 | No memory | Supermemory projection with PostgreSQL receipts |
-| One Render web service | One web service, one Postgres database, one attached disk |
+| One Railway project | One application service, one PostgreSQL 18 service, one attached volume |

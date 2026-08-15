@@ -24,7 +24,7 @@ The test plan therefore treats models and providers as replaceable dependencies 
 | End-to-end | Real Photon development project and authenticated Codex | Opt-in protected environment |
 | Chaos | Kill/restart/outage at every pipeline stage | Integration and staging |
 | Security | Identity, sandbox, injection, secrets, approval replay | Fake and opt-in real sandbox |
-| Documentation | Execute setup commands from a clean environment | Fresh local/Render account |
+| Documentation | Execute setup commands from a clean environment | Fresh local/Railway account |
 
 ## 3. Unit tests
 
@@ -33,7 +33,7 @@ The test plan therefore treats models and providers as replaceable dependencies 
 - Missing required variables produce one actionable validation error.
 - Invalid owner handle, path, duration, model, or effort is rejected.
 - Production refuses unsupported fallback unless explicitly enabled.
-- Disk paths must resolve beneath allowed mount roots.
+- Persistent paths must resolve beneath the Railway volume mount in production.
 
 ### Sender identity
 
@@ -246,7 +246,7 @@ Use a disposable PostgreSQL database and real pg-boss.
 | Spectrum stream disconnect | readiness degraded; supervised reconnect |
 | PostgreSQL unavailable | readiness false; no untracked execution |
 | ChatGPT auth expires | execution pauses; operator remediation surfaced |
-| Persistent disk missing | readiness false; no fresh untracked threads |
+| Persistent volume missing | readiness false; no fresh untracked threads |
 
 Run chaos tests repeatedly with randomized kill points.
 
@@ -286,8 +286,8 @@ A clean-room reviewer executes:
 - Database migration.
 - Codex login/status.
 - Photon setup.
-- Render Blueprint deployment.
-- Render device auth.
+- Railway application deployment.
+- Railway device auth.
 - First message.
 - Recovery and credential re-enrollment.
 
@@ -297,7 +297,7 @@ Every command is copied exactly from the docs. Failures become documentation bug
 
 ```text
 Node: pinned minimum and current supported LTS
-PostgreSQL: minimum supported and Render target major
+PostgreSQL: minimum supported and Railway target major
 Tests:
   - lint/typecheck
   - unit
@@ -306,7 +306,7 @@ Tests:
   - security
   - architecture/import rules
   - secret scanning
-  - Blueprint validation
+  - Railway configuration unit and official-schema validation
   - docs link check
 Optional protected:
   - live Codex smoke
@@ -322,7 +322,7 @@ The integration PR includes:
 - Chaos matrix results.
 - Exact pinned dependency versions.
 - Codex model/effort capability report.
-- Fresh Render deployment screen or redacted log evidence.
+- Fresh Railway deployment screen or redacted log evidence.
 - Secret scan report.
 - Migration and rollback evidence.
 - Known limitations and deferred tests.

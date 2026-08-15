@@ -1,6 +1,6 @@
 ---
 name: release-integration
-summary: Merge parallel worktrees safely, execute recovery/security evidence, validate Render deployment, and prepare a release without corrupting main.
+summary: Merge parallel worktrees safely, execute recovery/security evidence, validate Railway deployment, and prepare a release without corrupting main.
 ---
 
 # Release Integration Skill
@@ -10,7 +10,7 @@ summary: Merge parallel worktrees safely, execute recovery/security evidence, va
 - Combining transport, state, Codex, memory, security, and deployment branches.
 - Resolving shared-contract conflicts.
 - Running end-to-end or chaos tests.
-- Preparing the Render Blueprint and public documentation.
+- Preparing the Railway service configuration and public documentation.
 - Publishing a release candidate.
 
 ## Read first
@@ -40,7 +40,7 @@ summary: Merge parallel worktrees safely, execute recovery/security evidence, va
 - Codex CLI/SDK/model capability probe passes.
 - Supermemory isolation/deletion passes.
 - Outbound restart tests show no duplicates.
-- Render Blueprint validates.
+- Railway configuration passes unit checks and the official JSON schema.
 - Clean-room deployment and device auth work.
 - Docs and `.env.example` match code.
 - Secret scan passes.

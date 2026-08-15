@@ -16,7 +16,7 @@ The implementation does **not** modify the original starter in place during plan
 | Codex runtime | `feat/codex-runtime` | SDK wrapper, auth/capability checks, thread lifecycle, model router | Yes |
 | Memory | `feat/supermemory` | Recall, curation, deletion, isolation tests | Yes |
 | Security | `feat/security-approvals` | Sender auth, pairing, permission profiles, approvals, redaction | After identity contracts |
-| Deploy/docs | `feat/render-docs` | Blueprint, local setup, health/readiness, docs | After config contracts |
+| Deploy/docs | `main` | Railway service config, local setup, health/readiness, docs | After config contracts |
 
 No worktree owns the same implementation file. Shared contract changes go through the contracts branch first, then are merged or rebased into each branch.
 
@@ -73,7 +73,7 @@ Create the new repository shape, pin the runtime, define validated interfaces, a
   "db:migrate": "tsx src/db/migrate.ts",
   "codex:login": "codex login --device-auth",
   "codex:status": "codex login status",
-  "render:validate": "render blueprints validate render.yaml"
+  "railway:validate": "vitest run test/unit/railway-config.test.ts"
 }
 ```
 
@@ -122,7 +122,7 @@ Replace the starter’s webhook flow with a persistent Spectrum Cloud receive lo
 | `src/http/readiness.ts` | Spectrum connection state and redacted diagnostics |
 | `src/index.ts` | Start receive loop concurrently with queue and HTTP server |
 | `package.json` | Remove `@spectrum-ts/express` unless another feature explicitly needs it |
-| `render.yaml` | Remove webhook secret from environment list |
+| `railway.json` | Remove webhook secret from environment list |
 
 ### Implementation details
 
@@ -221,7 +221,7 @@ A database/schema reviewer and a separate recovery-test agent are useful. They s
 
 ### Goal
 
-Add a constrained, testable Codex adapter that supports resumable threads, local or Render execution, model profiles, capability probing, and cancellation.
+Add a constrained, testable Codex adapter that supports resumable threads, local or Railway execution, model profiles, capability probing, and cancellation.
 
 ### Worktree
 
@@ -453,7 +453,7 @@ An independent security reviewer is strongly recommended. The primary implementa
 
 ---
 
-## Step 8 — Render Blueprint, end-to-end recovery, documentation, and release
+## Step 8 — Railway deployment, end-to-end recovery, documentation, and release
 
 ### Goal
 
@@ -461,41 +461,41 @@ Make the project genuinely deployable from a clean account and prove it survives
 
 ### Worktree
 
-`feat/render-docs`, merged by the integration owner.
+Implemented directly on `main` for the hosting migration after all local checks pass.
 
 ### Files to create or change
 
 | File | Change |
 |---|---|
-| `render.yaml` | Web service, PostgreSQL, persistent disk, dynamic database URL, secret prompts |
+| `railway.json` | Application service build, migration, start, health, restart, overlap, and draining settings |
 | `src/http/readiness.ts` | Full component readiness |
 | `src/index.ts` | Final boot order and graceful shutdown |
-| `README.md` | Zero-to-first-message guide and Deploy to Render button |
+| `README.md` | Zero-to-first-message guide and Deploy to Railway button |
 | `ARCHITECTURE.md` | Final diagrams and extension points |
 | `AGENTS.md` | Final coding rules |
 | `docs/*` | PRD, model, memory, security, testing, business, docs index |
-| `test/e2e/render-smoke.md` or script | Clean-deploy checklist |
+| `test/e2e/railway-smoke.md` or script | Clean-deploy checklist |
 | `test/chaos/*` | Kill/restart/provider outage scenarios |
 
 ### Implementation details
 
-1. Blueprint provisions one paid web service, one PostgreSQL database, and one persistent disk.
-2. Set `CODEX_HOME` and workspace root under the disk mount.
-3. Use database dynamic references; never ask the user to copy connection strings manually.
-4. Prompt only for Photon credentials, Supermemory key, owner handles, and optional auth/model configuration.
+1. Create one Railway application service, one PostgreSQL 18 service, and one volume.
+2. Set `CODEX_HOME` and workspace root under the volume mount.
+3. Use `DATABASE_URL=${{Postgres.DATABASE_URL}}`; never ask the user to copy connection strings manually.
+4. Set Photon credentials, Supermemory key, owner handles, and optional auth/model configuration as Railway service variables.
 5. Start in live-but-not-ready state until Codex enrollment is complete.
-6. Document `npm run codex:login` through Render Shell and local `codex login`.
-7. Validate disk permissions and credential storage mode at startup.
+6. Document `railway ssh`, `npm run codex:login`, and `npm run codex:status`.
+7. Validate volume permissions and credential storage mode at startup.
 8. Run migrations as a pre-deploy command or release step.
-9. Execute Blueprint validation in CI.
-10. Run clean local and Render smoke tests.
+9. Execute Railway configuration unit tests and official JSON schema validation in CI.
+10. Run clean local and Railway smoke tests.
 11. Include a rollback procedure and auth re-enrollment procedure.
 12. Generate an `llms.txt` or equivalent Markdown index for implementation agents.
 
 ### Tests
 
 - Fresh local install from `.env.example` reaches first authorized message.
-- Fresh Render deploy provisions all resources and reports only expected missing auth.
+- Fresh Railway deploy provisions all resources and reports only expected missing auth.
 - Device auth survives restart.
 - Kill process during plan, task, synthesis, and each outbound part; state recovers.
 - Simulate Spectrum disconnect, database timeout, Supermemory timeout, and expired Codex auth.
@@ -522,7 +522,7 @@ A release/documentation agent can execute the guide exactly as written. The fina
 5. feat/supermemory            → integration
 6. orchestration implementation→ integration
 7. feat/security-approvals     → integration
-8. feat/render-docs            → integration
+8. Railway hosting migration  → main
 9. integration hardening       → main through one reviewed PR
 ```
 

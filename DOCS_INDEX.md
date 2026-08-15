@@ -1,6 +1,6 @@
 # Markdown-First Documentation Index
 
-**Last verified:** August 14, 2026
+**Last verified:** August 15, 2026
 
 Use the Markdown/LLM-friendly sources first. When a provider does not expose a stable Markdown page for a specific topic, the normal official page or official GitHub source is listed.
 
@@ -9,7 +9,7 @@ Use the Markdown/LLM-friendly sources first. When a provider does not expose a s
 - LLM-oriented implementation index: [`docs/llms.txt`](./docs/llms.txt)
 - Deployment and authentication: [`DEPLOYMENT_AND_AUTH.md`](./DEPLOYMENT_AND_AUTH.md)
 - Operations and rollback: [`docs/OPERATIONS.md`](./docs/OPERATIONS.md)
-- Clean local/Render evidence checklist: [`test/e2e/render-smoke.md`](./test/e2e/render-smoke.md)
+- Clean local/Railway evidence checklist: [`test/e2e/railway-smoke.md`](./test/e2e/railway-smoke.md)
 
 The local index distinguishes implemented modules, intended contracts, and protected/live evidence. Do not infer provider success from an offline test.
 
@@ -96,18 +96,18 @@ Topics:
 - Hybrid search.
 - Convex and Codex integration notes where relevant.
 
-## 5. Render
+## 5. Railway
 
-- Documentation index: <https://render.com/docs/llms.txt>
-- Blueprint specification: <https://render.com/docs/blueprint-spec>
-- Deploy to Render: <https://render.com/docs/deploy-to-render>
-- Environment variables: <https://render.com/docs/configure-environment-variables>
-- PostgreSQL: <https://render.com/docs/postgresql-creating-connecting>
-- Persistent disks: <https://render.com/docs/disks>
-- Health checks: <https://render.com/docs/health-checks>
-- Web services: <https://render.com/docs/web-services>
+- Documentation index: <https://docs.railway.com/llms.txt>
+- Config as Code reference: <https://docs.railway.com/config-as-code/reference>
+- Variables reference: <https://docs.railway.com/variables/reference>
+- PostgreSQL: <https://docs.railway.com/databases/postgresql>
+- Volumes: <https://docs.railway.com/volumes/reference>
+- Health checks: <https://docs.railway.com/deployments/healthchecks>
+- GitHub autodeploys and Wait for CI: <https://docs.railway.com/deployments/github-autodeploys>
+- SSH: <https://docs.railway.com/cli/ssh>
 
-Verify current Blueprint plan names and validate `render.yaml` in CI.
+Validate `railway.json` against Railway's live official JSON schema in CI.
 
 ## 6. PostgreSQL, Drizzle, and pg-boss
 
@@ -159,6 +159,6 @@ Before each public release:
 1. Re-fetch every `llms.txt` index.
 2. Recheck pinned package requirements and breaking changes.
 3. Re-run model/effort capability probes.
-4. Validate Render Blueprint fields and plan names.
+4. Validate Railway configuration fields against the official schema.
 5. Update the “last verified” date and release notes.
 6. Do not leave a dead link silently; replace it with the current official source and explain the change.

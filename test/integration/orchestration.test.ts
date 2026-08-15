@@ -170,6 +170,7 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     const decision = interactionDecisionSchema.parse({
       mode: "delegate",
       modelProfile: "main",
+      userMessage: null,
       statusMessage: "I’m checking both paths now.",
       tasks,
       waitForTasks: true,
@@ -272,6 +273,7 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
       mode: "direct",
       modelProfile: "main",
       userMessage: "Hi — what would you like to work on?",
+      statusMessage: null,
       tasks: [],
       waitForTasks: false,
       memoryCandidates: [],
@@ -315,6 +317,8 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     const decision = interactionDecisionSchema.parse({
       mode: "delegate",
       modelProfile: "main",
+      userMessage: null,
+      statusMessage: null,
       tasks: [task],
       waitForTasks: true,
       memoryCandidates: [],

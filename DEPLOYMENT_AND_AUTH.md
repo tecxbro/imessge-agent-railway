@@ -1,57 +1,53 @@
 # Deployment and Codex Authentication
 
-**Last verified against official documentation:** August 14, 2026
+**Last verified against official documentation:** August 15, 2026
 
 ## 1. Deployment contract and present limitation
 
-The intended deployment is one private Render Web Service, one Render Postgres database, and one persistent disk. Render provisions the infrastructure from [`render.yaml`](./render.yaml); the operator still provides private provider credentials and, in ChatGPT mode, completes one Codex device-login flow.
+The intended deployment is one private Railway application service, one Railway PostgreSQL 18 service, and one persistent volume mounted at `/var/data`. [`railway.json`](./railway.json) controls the application service build/deploy settings; Railway project resources, variables, replica count, GitHub source, and volume attachment are configured in the Railway project. The operator still provides private provider credentials and, in ChatGPT mode, completes one Codex device-login flow.
 
-This branch does **not** yet prove a clean first-message deployment. `src/index.ts` provides injectable boot ordering and operational graceful-shutdown composition, but `npm start` still runs the foundation `src/server.ts` entrypoint. That entrypoint exposes `/healthz` and redacted `/readyz`, yet it does not compose the Spectrum, queue, Codex, memory, or security handlers, so readiness remains false. The integration owner must wire those handlers before the clean-local, clean-Render, and first-message gates can pass.
+This branch does **not** yet prove a clean first-message Railway deployment. `npm start` runs the composed `src/server.ts` lifecycle, but production acceptance still requires migrated data, preserved installation secrets, live provider credentials, `/readyz`, one authorized message, and restart evidence.
 
 Current verification boundaries:
 
-- No clean Render deployment was performed from this branch.
-- No live Photon, Codex, or Supermemory path was exercised as part of Step 8 documentation work.
+- No clean Railway deployment was performed from this branch.
+- No live Photon, Codex, or Supermemory path was exercised as part of this hosting migration.
 - The dedicated memory-provider outage/Supermemory-timeout resilience exercise was intentionally not run by user direction. Any fake-provider assertion reached by a broad offline suite is not accepted as outage validation; the behavior in this guide remains required policy.
-- `npm run render:validate` was attempted with Render CLI 2.22.0, but the CLI stopped before validating the file because no Render workspace/default workspace was configured: `no workspace specified and no default workspace set`.
+- The Railway CLI is not installed in the current local environment. `railway.json` is validated by unit tests and CI against Railway's official JSON schema; no Railway project was created or linked in this migration pass.
 - Passing fake-provider, unit, integration, or chaos tests is not evidence that a provider works live.
 
-Use [`test/e2e/render-smoke.md`](./test/e2e/render-smoke.md) to capture reviewer-owned evidence rather than turning an expected behavior into an unsupported claim.
+Use [`test/e2e/railway-smoke.md`](./test/e2e/railway-smoke.md) to capture reviewer-owned evidence rather than turning an expected behavior into an unsupported claim.
 
 ## 2. Provisioned topology
 
-The checked-in Blueprint is the source of truth. It declares:
+The checked-in service configuration declares:
 
-- One paid Node Web Service, fixed at one instance.
-- One Render Postgres database in the same region.
-- One persistent disk mounted at `/var/data`.
-- `CODEX_HOME=/var/data/codex` for Codex credentials and session files.
-- `AGENT_WORKSPACE_ROOT=/var/data/workspaces` for agent workspaces.
-- `DATABASE_URL` populated through a Render `fromDatabase` reference, not copied manually.
+- Railpack and the exact build command.
 - `npm run db:migrate` as the pre-deploy command.
-- `/healthz` as Render's health-check path.
-- Render's platform-managed graceful-shutdown delay. A custom
-  `maxShutdownDelaySeconds` value is unsupported while the service has a disk.
+- `npm start` as the start command.
+- `/healthz` as Railway's health-check path.
+- Zero overlap between old and new deployments.
+- A 90-second SIGTERM draining window.
 
-The disk makes v1 intentionally single-instance. Render does not scale a service with an attached persistent disk. Do not remove the disk or increase `numInstances` without redesigning credential and workspace ownership.
+The Railway project must separately contain exactly one application service, one PostgreSQL 18 service, and one volume attached to the application at `/var/data`. Configure one application replica. Do not remove the volume or increase replicas without redesigning credential and workspace ownership.
 
 ## 3. Configuration and secret inventory
 
 Start from [`.env.example`](./.env.example). Required values are validated at process start.
 
-| Variable | Local source | Render source | Secret |
+| Variable | Local source | Railway source | Secret |
 |---|---|---|---|
-| `SPECTRUM_PROJECT_ID` | operator | Blueprint prompt | yes |
-| `SPECTRUM_PROJECT_SECRET` | operator | Blueprint prompt | yes |
-| `DATABASE_URL` | local PostgreSQL | dynamic database reference | yes |
-| `AGENT_OWNER_HANDLES` | operator | required Blueprint prompt | private |
-| `DEPLOYMENT_ID` | operator-generated UUID | derived from `RENDER_SERVICE_ID` | no |
-| `APP_ENCRYPTION_KEY` | `openssl rand -base64 32` | generated by Render | yes |
+| `SPECTRUM_PROJECT_ID` | operator | service variable | yes |
+| `SPECTRUM_PROJECT_SECRET` | operator | service variable | yes |
+| `DATABASE_URL` | local PostgreSQL | `${{Postgres.DATABASE_URL}}` | yes |
+| `AGENT_OWNER_HANDLES` | operator | service variable | private |
+| `DEPLOYMENT_ID` | operator-generated UUID | preserve existing value; new installs may derive it from `RAILWAY_SERVICE_ID` | no |
+| `APP_ENCRYPTION_KEY` | `openssl rand -base64 32` | preserve existing exact value | yes |
 | `CODEX_HOME` | absolute private path | `/var/data/codex` | contains secrets |
 | `AGENT_WORKSPACE_ROOT` | separate absolute path | `/var/data/workspaces` | may contain private data |
-| `CODEX_AUTH_MODE` | `chatgpt` or `api_key` | defaults to `chatgpt` | no |
-| `OPENAI_API_KEY` | only for API-key mode | Render secret, only for API-key mode | yes |
-| `SUPERMEMORY_API_KEY` | optional | initial Blueprint prompt; blank disables memory | yes |
+| `CODEX_AUTH_MODE` | `chatgpt` or `api_key` | service variable | no |
+| `OPENAI_API_KEY` | only for API-key mode | service variable, only for API-key mode | yes |
+| `SUPERMEMORY_API_KEY` | optional | service variable; absence disables memory | yes |
 
 `CODEX_HOME` and `AGENT_WORKSPACE_ROOT` must be absolute, separate, non-overlapping directories. Startup creates them with mode `0700`, validates directory type/mode plus read/write/execute access, and maintains `$CODEX_HOME/config.toml` with mode `0600`. File-based Codex credentials are required in a headless container.
 
@@ -62,11 +58,7 @@ E.164 phone number or email address that Spectrum reports for each person
 allowed to command the agent. Multiple entries are comma-separated. The
 application rejects any other sender before a model or child process runs.
 
-Supermemory is disabled when `SUPERMEMORY_API_KEY` is absent. The initial
-Blueprint now presents it as an optional secret so an operator can configure
-memory during the same setup flow. Render does not replay new `sync: false`
-prompts when an existing Blueprint is updated, so existing services add or
-rotate the value directly and redeploy. Core readiness does not depend on it.
+Supermemory is disabled when `SUPERMEMORY_API_KEY` is absent. Add or rotate the service variable and redeploy to change this. Core readiness does not depend on it. Preserve `SUPERMEMORY_CONTAINER_PREFIX` during migration so the installation continues to use the same memory namespace.
 
 Do not put credentials in PostgreSQL, Supermemory, job payloads, or logs. Do not print `auth.json` to diagnose authentication.
 
@@ -108,16 +100,16 @@ Set:
 
 ```dotenv
 CODEX_AUTH_MODE=api_key
-OPENAI_API_KEY=<Render secret or local secret>
+OPENAI_API_KEY=<Railway service variable or local secret>
 ```
 
-The application passes `OPENAI_API_KEY` only across the explicit Codex child-process boundary. It does not require a ChatGPT device login and must not pass the key to unrelated subprocesses. Do not put the value directly in `render.yaml` or commit it to `.env`.
+The application passes `OPENAI_API_KEY` only across the explicit Codex child-process boundary. It does not require a ChatGPT device login and must not pass the key to unrelated subprocesses. Do not put the value directly in `railway.json` or commit it to `.env`.
 
 The official Codex CLI also supports `printenv OPENAI_API_KEY | codex login --with-api-key`, but this starter does not require that cache-writing flow in application API-key mode. The runtime supplies the key directly. Use `codex login status` only when diagnosing an intentionally cached standalone CLI login.
 
-To change a Render deployment from ChatGPT mode to API-key mode:
+To change a Railway deployment from ChatGPT mode to API-key mode:
 
-1. Add `OPENAI_API_KEY` as a secret environment variable in the Web Service.
+1. Add `OPENAI_API_KEY` as a Railway service variable.
 2. Set `CODEX_AUTH_MODE=api_key`.
 3. Redeploy/restart the service.
 4. Verify the redacted capability probe and `/readyz`; never verify by printing the key.
@@ -128,9 +120,9 @@ To rotate the key, replace the secret, restart, run the protected Codex capabili
 
 ### Prerequisites
 
-- Node.js 22.12 through 22.x, or Node.js 24 or newer. Node 23 is not supported by the pinned test runner.
+- Node.js 22.12.0.
 - npm compatible with the checked-in lockfile.
-- PostgreSQL 13 or newer; PostgreSQL 18 matches the Render target.
+- PostgreSQL 13 or newer; PostgreSQL 18 matches the Railway target.
 - A Photon project with Spectrum Cloud iMessage configured for any live transport test.
 - A ChatGPT account/workspace with device login enabled, or an OpenAI Platform API key.
 - A Supermemory API key only when semantic memory is enabled.
@@ -190,35 +182,34 @@ curl --fail --silent http://127.0.0.1:10000/healthz
 curl --silent --show-error http://127.0.0.1:10000/readyz
 ```
 
-On the current branch, the second request returns HTTP 503 with redacted component states because `src/server.ts` is not yet composed with `src/index.ts`. Record the clean-local first-message gate as blocked until integration fixes that entrypoint. Do not treat a 200 from `/healthz` as proof that the queue, Codex, Spectrum, or memory path is ready.
+The second request returns HTTP 200 only when every critical component is ready. Do not treat a 200 from `/healthz` as proof that the queue, Codex, Spectrum, or memory path is ready.
 
-## 6. Clean Render Blueprint deployment
+## 6. Clean Railway deployment
 
-Use the [official Render Blueprint flow](https://render.com/docs/infrastructure-as-code) against the reviewed commit containing `render.yaml`.
+Use the [official Railway service setup](https://docs.railway.com/guides/services) against the reviewed commit containing `railway.json`.
 
-1. In a fresh Render workspace, create a Blueprint from the release repository and select its `render.yaml`.
-2. Review the plan before applying it. It must contain exactly one Web Service, one Render Postgres database, and one disk on the Web Service.
-3. Enter the required `sync: false` prompts: `SPECTRUM_PROJECT_ID` and `SPECTRUM_PROJECT_SECRET` from Photon, plus the separate application sender allowlist in `AGENT_OWNER_HANDLES`. Enter the optional `SUPERMEMORY_API_KEY` prompt to enable semantic memory or leave it blank. Render prompts for these only on initial creation; secrets added later must be configured directly on the existing service.
-4. Confirm `DATABASE_URL` is a dynamic reference to `imessage-agent-db`. Never paste a database connection string into a Blueprint prompt.
-5. Apply the Blueprint. The build must run `npm ci --include=dev && npm run build`; the explicit include keeps the pinned TypeScript declarations and migration tooling available while `NODE_ENV=production` is set. The pre-deploy phase must run `npm run db:migrate`; the service must start with `npm start`.
-6. Confirm the disk is mounted at `/var/data`, the service has exactly one instance, and `/var/data/codex` plus `/var/data/workspaces` are writable only by the service account.
-7. Open the generated Render URL. It must identify itself as the operator status page and must not claim `Agent ready` before composition and enrollment are complete.
-8. Verify `GET /healthz` returns HTTP 200. Do not expect `/readyz` to pass before Codex authentication and all critical dependencies are ready.
-9. For ChatGPT mode, follow the operator page and open the private Render Shell:
+1. Create a Railway project with one application service sourced from this repository's `main` branch.
+2. Set the application config file path to `/railway.json` and keep one replica.
+3. Add one PostgreSQL 18 service. Verify its major version before migration; do not change database majors during this hosting cutover.
+4. Attach one volume to the application service at `/var/data`.
+5. Set `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `NODE_ENV=production`, `CODEX_HOME=/var/data/codex`, and `AGENT_WORKSPACE_ROOT=/var/data/workspaces`.
+6. Set `DEPLOYMENT_ID` and `APP_ENCRYPTION_KEY` to the exact existing production values. Copy the Photon, owner, auth, memory, model, concurrency, retention, pairing, group, and rate-limit configuration that is active in production.
+7. Enable Wait for CI before enabling automatic deployments from `main`.
+8. Deploy. The build must run `npm ci --include=dev && npm run build`; pre-deploy must run `npm run db:migrate`; start must run `npm start`; and the deployment health check must use `/healthz`.
+9. Confirm the application has one replica and `/var/data/codex` plus `/var/data/workspaces` are writable only by the service account.
+10. Open the generated Railway URL. It must identify itself as the operator status page and must not claim `Agent ready` before enrollment is complete.
+11. Verify `GET /healthz` returns HTTP 200. Do not expect `/readyz` to pass before Codex authentication and all critical dependencies are ready.
+12. For ChatGPT mode, open Railway SSH:
 
    ```bash
+   railway ssh
    npm run codex:login
    npm run codex:status
    ```
 
-   Complete the device-code flow in a trusted browser, restart the Web Service, and verify authentication survives the restart.
-10. For API-key mode, add `OPENAI_API_KEY` as a Render secret, set `CODEX_AUTH_MODE=api_key`, and redeploy. Do not run device login.
-11. When the composed entrypoint is available, require `/readyz` HTTP 200 before sending the first authorized message.
-
-The current branch cannot complete the end-to-end readiness and message portions
-of steps 8-11 because `npm start` still targets the foundation entrypoint.
-Preserve the failed/blocked evidence in the smoke checklist; do not work around
-it by claiming that infrastructure liveness equals application readiness.
+   Complete the device-code flow in a trusted browser, restart the application service, and verify authentication survives the restart.
+13. For API-key mode, add `OPENAI_API_KEY` as a Railway service variable, set `CODEX_AUTH_MODE=api_key`, and redeploy. Do not run device login.
+14. Require `/readyz` HTTP 200 before sending the first authorized message.
 
 ## 7. Health and readiness
 
@@ -231,9 +222,9 @@ GET /readyz  -> 200 when all critical components are ready
 GET /readyz  -> 503 with redacted component states and safe operator actions otherwise
 ```
 
-Critical readiness components are configuration, database, migrations, queue, Spectrum, Codex authentication, Codex capabilities, disk, and workspace. Supermemory is optional at turn time and may be `disabled` or `degraded` without making operational state unsafe.
+Critical readiness components are configuration, database, migrations, queue, Spectrum, Codex authentication, Codex capabilities, persistent volume, and workspace. Supermemory is optional at turn time and may be `disabled` or `degraded` without making operational state unsafe.
 
-Render intentionally probes `/healthz`, not `/readyz`. Missing Codex enrollment or a provider outage should keep the process available for private remediation while `/readyz` refuses message execution. The generated public URL is therefore only an operator status surface; it explicitly distinguishes infrastructure liveness from agent readiness. None of these endpoints may include secrets, raw provider errors, handles, database URLs, arbitrary filesystem paths, or message content.
+Railway intentionally probes `/healthz`, not `/readyz`. Missing Codex enrollment or a provider outage should keep the process available for private remediation while `/readyz` refuses message execution. The generated public URL is therefore only an operator status surface; it explicitly distinguishes infrastructure liveness from agent readiness. None of these endpoints may include secrets, raw provider errors, handles, database URLs, arbitrary filesystem paths, or message content.
 
 Useful checks:
 
@@ -246,21 +237,56 @@ Save the response after redaction. HTTP 503 from `/readyz` is expected during in
 
 ## 8. Migrations and application rollback
 
-`npm run db:migrate` applies checked-in Drizzle migrations. Render runs it as `preDeployCommand`, after build and before the new process starts. Migration failure must stop deployment.
+`npm run db:migrate` applies checked-in Drizzle migrations. Railway runs it as `preDeployCommand`, after build and before the new process starts. Migration failure must stop deployment.
 
 Before each release:
 
 1. Record the outgoing application commit.
 2. Read every new `src/db/migrations/*.notes.md` file.
 3. Confirm the outgoing release is compatible with the post-migration schema.
-4. Create or verify a Render database recovery point according to the database plan.
+4. Create or verify a Railway PostgreSQL backup according to the database plan.
 5. Run the migration in staging and record duration/locks.
-6. Deploy the new application only after migration success.
+
+### Hosting cutover
+
+Before changing providers, capture the exact production `DEPLOYMENT_ID`, `APP_ENCRYPTION_KEY`, Photon credentials, owner handles, auth mode, optional provider keys, memory namespace, and every non-default runtime override. When the configured deployment ID is uncertain, read the installation identity from the production database:
+
+```sql
+SELECT id
+FROM deployments
+ORDER BY created_at ASC
+LIMIT 1;
+```
+
+Never generate a replacement encryption key for migrated data. A different key makes retained encrypted messages, route data, and thread data unreadable.
+
+Perform a dry run before cutover:
+
+1. Create the Railway PostgreSQL target.
+2. Export the production database in custom format with `pg_dump`.
+3. Restore it with `pg_restore`.
+4. Compare schema, extensions, migrations, deployment identity, and table row counts.
+5. Discard or reset the dry-run target before the final restore.
+
+For the final cutover:
+
+1. Stop the legacy application service and confirm its Spectrum consumer is gone.
+2. Take the final database dump.
+3. Restore it into a clean Railway PostgreSQL database.
+4. Verify deployment, owner, space, undrained-message, active-chain, queued-job, and outbound-cursor state.
+5. Deploy the Railway application with the preserved values.
+6. Require `/healthz` HTTP 200, complete ChatGPT enrollment through Railway SSH when needed, restart, and require `/readyz` HTTP 200.
+7. Send one message from an authorized owner and confirm exactly one inbound message, one chain, and one outbound delivery.
+8. Redeploy once and confirm Codex authentication and workspace storage survive.
+
+Never run the legacy and Railway application services against the same Spectrum project at the same time. If acceptance fails, stop Railway and confirm its Spectrum process is gone before restarting the legacy service. Keep the legacy database untouched until Railway acceptance and a final backup are complete.
+
+After acceptance, remove the legacy custom domains, deploy hooks, repository integration, tokens, application service, persistent storage, database, and retained secret copies. Verify the retired platform no longer has repository access.
 
 Application rollback:
 
 1. Set the service unavailable for new execution and wait for graceful shutdown.
-2. Roll back to the recorded Render deploy/commit **only if its migration notes declare compatibility with the current schema**.
+2. Roll back to the recorded Railway deploy/commit **only if its migration notes declare compatibility with the current schema**.
 3. Leave forward-compatible schema additions in place.
 4. Restart and verify `/healthz`, `/readyz`, queue reconciliation, outbound cursors, and one authorized non-mutating turn.
 
@@ -270,11 +296,11 @@ If the old application is not compatible with the current schema, roll forward w
 
 ## 9. Restart and provider-outage behavior
 
-The durable source of truth is PostgreSQL. Codex files and workspaces on disk support continuity but do not replace database recovery records.
+The durable source of truth is PostgreSQL. Codex files and workspaces on the volume support continuity but do not replace database recovery records.
 
 ### Graceful restart
 
-On `SIGTERM`/`SIGINT`, the composed bootstrap marks readiness false and aborts active work. Registered hooks then stop Spectrum, stop Codex work, checkpoint outbound state, stop the queue, close the database, and close HTTP. Render controls the shutdown delay for this disk-backed service, so recovery must remain safe if the platform terminates the process before every hook completes. A critical cleanup failure makes the shutdown result non-clean.
+On `SIGTERM`/`SIGINT`, the composed bootstrap marks readiness false and aborts active work. Registered hooks then stop Spectrum, stop Codex work, checkpoint outbound state, stop the queue, close the database, and close HTTP. `railway.json` configures a 90-second draining window, but recovery must remain safe if the platform terminates the process before every hook completes. A critical cleanup failure makes the shutdown result non-clean.
 
 After restart, run durable pipeline reconciliation before accepting new work. It reschedules undrained inbound spaces, queued planning chains, and resumable outbound batches using stable singleton keys.
 
@@ -305,31 +331,32 @@ The dedicated resilience exercise was intentionally skipped by user direction. K
 
 The composed service stays live but not ready, does not start Spectrum intake, and surfaces `CODEX_AUTH_EXPIRED` with a safe action. Durable queued state remains. In ChatGPT mode, rerun `npm run codex:login` and `npm run codex:status`; in API-key mode, replace the secret. Restart and require the configured model/effort capability probes to pass before resuming.
 
-### Persistent disk loss
+### Persistent volume loss
 
-Stop execution. Attach/repair the correct disk or provision replacement private storage, then re-enroll Codex and recreate workspaces from trusted remotes/backups. Resume threads from bounded PostgreSQL summaries. Rotate/revoke credentials if disk exposure is possible.
+Stop execution. Attach or repair the correct volume, or provision replacement private storage, then re-enroll Codex and recreate workspaces from trusted remotes/backups. Resume threads from bounded PostgreSQL summaries. Rotate or revoke credentials if volume exposure is possible.
 
 ## 10. Release evidence
 
 Before release, attach:
 
-- The exact reviewed commit and `render.yaml` validation output.
-- Clean local and clean Render evidence from [`test/e2e/render-smoke.md`](./test/e2e/render-smoke.md).
+- The exact reviewed commit and `railway.json` validation output.
+- Clean local and clean Railway evidence from [`test/e2e/railway-smoke.md`](./test/e2e/railway-smoke.md).
 - `npm run typecheck`, `npm test`, `npm run test:integration`, and `npm run test:chaos` output, with skipped database/live tests identified.
 - Migration and rollback compatibility notes.
 - Redacted `/healthz` and `/readyz` responses before and after restart.
 - Protected live test output only for providers actually exercised.
-- Known limitations, especially the current uncomposed production entrypoint.
+- Known limitations, especially any untested live-provider or database-backed path.
 
-Do not state that Render, Photon, Codex, or Supermemory works live unless the corresponding protected live test was executed and its redacted evidence is attached.
+Do not state that Railway, Photon, Codex, or Supermemory works live unless the corresponding protected live test was executed and its redacted evidence is attached.
 
 ## 11. Primary sources
 
 - [Official Codex authentication](https://learn.chatgpt.com/docs/auth.md)
 - [Official Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference.md)
-- [Render Blueprint specification](https://render.com/docs/blueprint-spec)
-- [Render persistent disks](https://render.com/docs/disks)
-- [Render health checks](https://render.com/docs/health-checks)
-- [Render Postgres](https://render.com/docs/postgresql-creating-connecting)
+- [Railway Config as Code reference](https://docs.railway.com/config-as-code/reference)
+- [Railway volumes](https://docs.railway.com/volumes/reference)
+- [Railway health checks](https://docs.railway.com/deployments/healthchecks)
+- [Railway PostgreSQL](https://docs.railway.com/databases/postgresql)
+- [Railway GitHub autodeploys and Wait for CI](https://docs.railway.com/deployments/github-autodeploys)
 - [Photon Spectrum documentation index](https://photon.codes/docs/llms.txt)
 - [Supermemory documentation index](https://supermemory.ai/docs/llms.txt)

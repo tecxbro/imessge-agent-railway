@@ -73,7 +73,7 @@ Offer after v1:
 
 ### Segment D: platform ecosystem
 
-Photon, Supermemory, Render, and agent-tool vendors benefit when developers have a complete reference implementation. Partnerships, co-marketing, and certified templates can reduce customer acquisition cost.
+Photon, Supermemory, Railway, and agent-tool vendors benefit when developers have a complete reference implementation. Partnerships, co-marketing, and certified templates can reduce customer acquisition cost.
 
 ## 4. Differentiation
 
@@ -86,7 +86,7 @@ Photon, Supermemory, Render, and agent-tool vendors benefit when developers have
 | Memory | Explicit split between operational database and semantic memory |
 | Security | Sender authorization and approvals in code |
 | Extensibility | Markdown prompts, AGENTS.md, and Codex skills |
-| Deployment | One Render Blueprint plus transparent auth enrollment |
+| Deployment | One Railway project plus transparent auth enrollment |
 | Documentation | File-level implementation plan and primary Markdown sources |
 
 The moat is not the base model. It is the complete, trustworthy interaction and deployment system around the model.
@@ -96,7 +96,7 @@ The moat is not the base model. It is the complete, trustworthy interaction and 
 ### Free: open-source core
 
 - Full private single-owner starter.
-- Local and Render deployment.
+- Local and Railway deployment.
 - Core prompts and skills.
 - Community support.
 
@@ -104,7 +104,7 @@ Purpose: distribution, trust, ecosystem, and proof of implementation quality.
 
 ### Paid service 1: setup and customization
 
-- Install into customer-owned Photon, Render, Supermemory, and OpenAI/ChatGPT accounts.
+- Install into customer-owned Photon, Railway, Supermemory, and OpenAI/ChatGPT accounts.
 - Configure identity, repos, prompts, and initial skills.
 - Fixed-price onboarding or implementation package.
 
@@ -147,14 +147,14 @@ These are hypotheses to test, not fixed recommendations:
 - Team instance: base platform fee plus active users, workspaces, or task volume.
 - Premium skills: one-time license, subscription, or bundled with managed service.
 
-Do not hide provider costs. The customer may pay separately for Photon, Render, Supermemory, and OpenAI/API usage or ChatGPT entitlement.
+Do not hide provider costs. The customer may pay separately for Photon, Railway, Supermemory, and OpenAI/API usage or ChatGPT entitlement.
 
 ## 7. Cost structure
 
 Main components:
 
 1. **Photon:** plan and line costs vary by shared versus dedicated line and group requirements.
-2. **Render:** paid web service, PostgreSQL, and persistent disk.
+2. **Railway:** application service, PostgreSQL, and persistent volume.
 3. **Supermemory:** free/pro/usage-based memory operations.
 4. **OpenAI:** ChatGPT entitlement in login mode or token-based API cost in API-key mode.
 5. **Support:** deployment, provider auth, failed skills, and third-party API changes.
@@ -178,7 +178,7 @@ A polished GitHub template with:
 - GitHub template and release posts.
 - Hacker News and developer communities.
 - X/YouTube build demonstrations.
-- Photon, Render, Supermemory, and Codex ecosystem partnerships.
+- Photon, Railway, Supermemory, and Codex ecosystem partnerships.
 - Example forks for developer, founder, and team workflows.
 
 ### Content themes

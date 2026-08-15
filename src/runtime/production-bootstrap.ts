@@ -252,7 +252,7 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         interactionWorkingDirectory: environment.AGENT_WORKSPACE_ROOT,
         encrypt: cipher.encrypt,
         decrypt: cipher.decrypt,
-        // A blank Render disk has no code-owned execution binding. The
+        // A new Railway volume has no code-owned execution binding. The
         // interaction model therefore answers directly until an operator adds
         // an explicit workspace capability in a later requirement.
         capabilities: () => [],

@@ -9,7 +9,7 @@ Choose Convex instead of PostgreSQL when:
 - Convex functions/scheduling are preferred over a PostgreSQL queue.
 - A separate Convex project setup is acceptable.
 
-Do not choose it merely because it is an agent-related database. The default Render PostgreSQL design is simpler for a one-click private deployment.
+Do not choose it merely because it is an agent-related database. The default Railway PostgreSQL design is simpler for a private deployment.
 
 ## 2. Architectural rule
 
@@ -76,13 +76,13 @@ Keep the same materialized batch, stable client GUID, and send-cursor design. A 
 
 ## 7. Deployment impact
 
-A Render Blueprint cannot silently create and configure a new Convex project in the same way it creates Render Postgres. The deployer must:
+A Railway project cannot silently create and configure a separate Convex project as part of the application service deployment. The deployer must:
 
 1. Create/select a Convex project.
 2. Deploy Convex functions/schema.
 3. Supply deployment URL and deploy credentials as required.
-4. Configure the Render service.
-5. Verify Convex and Render releases are compatible.
+4. Configure the Railway application service.
+5. Verify Convex and Railway releases are compatible.
 
 This makes the experience “guided multi-provider setup,” not one-click infrastructure.
 
@@ -110,4 +110,4 @@ The deploy key should be used only by deployment tooling, not the long-running r
 
 ## 10. Decision checkpoint
 
-Use Convex when its realtime developer experience materially benefits the product. Use PostgreSQL when deployability, SQL auditability, and a single Render Blueprint are the priority. Both are valid; mixing them without a clear boundary is not.
+Use Convex when its realtime developer experience materially benefits the product. Use PostgreSQL when deployability, SQL auditability, and one Railway project are the priority. Both are valid; mixing them without a clear boundary is not.

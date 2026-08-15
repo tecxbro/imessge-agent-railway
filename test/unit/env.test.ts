@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  deploymentIdFromRenderServiceId,
+  deploymentIdFromRailwayServiceId,
   EnvironmentValidationError,
   loadEnvironment,
   modelProfilesFromEnvironment,
@@ -109,10 +109,13 @@ describe("loadEnvironment", () => {
     ).toBe("api_key");
   });
 
-  it("derives a stable private deployment UUID from Render's service ID", () => {
+  it("derives a stable private deployment UUID from Railway's service ID", () => {
     const withoutDeploymentId = validEnvironment({
       DEPLOYMENT_ID: undefined,
-      RENDER_SERVICE_ID: "srv-codex-agent-01",
+      RAILWAY_SERVICE_ID: "6f6efdf3-32ff-454f-a8fe-9ab8792667cc",
+      RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+      CODEX_HOME: "/var/data/codex",
+      AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
     });
 
     const first = loadEnvironment(withoutDeploymentId).DEPLOYMENT_ID;
@@ -120,30 +123,103 @@ describe("loadEnvironment", () => {
 
     expect(first).toBe(second);
     expect(first).toBe(
-      deploymentIdFromRenderServiceId("srv-codex-agent-01"),
+      deploymentIdFromRailwayServiceId(
+        "6f6efdf3-32ff-454f-a8fe-9ab8792667cc",
+      ),
     );
     expect(first).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
     );
-    expect(first).not.toContain("srv-codex-agent-01");
+    expect(first).not.toContain("6f6efdf3");
   });
 
-  it("preserves an explicit deployment UUID instead of replacing it on Render", () => {
+  it("derives different deployment UUIDs for different Railway services", () => {
+    expect(deploymentIdFromRailwayServiceId("service-one")).not.toBe(
+      deploymentIdFromRailwayServiceId("service-two"),
+    );
+  });
+
+  it("preserves an explicit deployment UUID instead of replacing it on Railway", () => {
     expect(
       loadEnvironment(
-        validEnvironment({ RENDER_SERVICE_ID: "srv-codex-agent-01" }),
+        validEnvironment({
+          RAILWAY_SERVICE_ID: "6f6efdf3-32ff-454f-a8fe-9ab8792667cc",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/var/data/codex",
+          AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
+        }),
       ).DEPLOYMENT_ID,
     ).toBe("00000000-0000-4000-8000-000000000001");
   });
 
-  it("rejects malformed Render service IDs used for derivation", () => {
+  it("ignores Railway deployment IDs for installation identity", () => {
     expect(() =>
       loadEnvironment(
         validEnvironment({
           DEPLOYMENT_ID: undefined,
-          RENDER_SERVICE_ID: "srv id with spaces",
+          RAILWAY_DEPLOYMENT_ID: "deployment-123",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/var/data/codex",
+          AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
         }),
       ),
-    ).toThrow();
+    ).toThrow(/DEPLOYMENT_ID is required/u);
+  });
+
+  it("rejects malformed Railway service IDs used for derivation", () => {
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          DEPLOYMENT_ID: undefined,
+          RAILWAY_SERVICE_ID: "service id with spaces",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/var/data/codex",
+          AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
+        }),
+      ),
+    ).toThrow(/RAILWAY_SERVICE_ID is malformed/u);
+  });
+
+  it("requires the Railway volume and keeps protected paths beneath it", () => {
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_ID: "service-123",
+        }),
+      ),
+    ).toThrow(/RAILWAY_VOLUME_MOUNT_PATH is required/u);
+
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_ID: "service-123",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/tmp/codex",
+          AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
+        }),
+      ),
+    ).toThrow(/CODEX_HOME must be under RAILWAY_VOLUME_MOUNT_PATH/u);
+
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_ID: "service-123",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/var/data/codex",
+          AGENT_WORKSPACE_ROOT: "/tmp/workspaces",
+        }),
+      ),
+    ).toThrow(
+      /AGENT_WORKSPACE_ROOT must be under RAILWAY_VOLUME_MOUNT_PATH/u,
+    );
+  });
+
+  it("continues to support local development without Railway variables", () => {
+    expect(loadEnvironment(validEnvironment()).DEPLOYMENT_ID).toBe(
+      "00000000-0000-4000-8000-000000000001",
+    );
   });
 });

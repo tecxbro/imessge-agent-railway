@@ -6,7 +6,7 @@ The target is one long-running Node.js service with three concurrent responsibil
 
 1. consume iMessage events from Spectrum Cloud’s persistent `app.messages` gRPC stream;
 2. run the durable inbound, Codex, outbound, and memory jobs backed by PostgreSQL/pg-boss; and
-3. expose liveness and readiness endpoints to Render.
+3. expose liveness and readiness endpoints to Railway.
 
 The branch composes the provider, database, queue, Codex, memory, storage, health, and shutdown modules into that topology. `src/index.ts` exposes `startAgentService()` and an injected `AgentServiceBootstrap`; `src/runtime/production-bootstrap.ts` supplies the production adapters; and `src/server.ts`, used by `npm run dev` and `npm start`, starts the composed lifecycle.
 
@@ -14,14 +14,14 @@ This distinction is an intentional release boundary:
 
 | Layer | Current branch |
 |---|---|
-| Render resource declaration | Present in `render.yaml` |
+| Railway service configuration | Present in `railway.json`; project resources are configured in Railway |
 | Persistent storage preparation | Composed as an injectable startup stage |
 | Full health/readiness server | Used by `src/server.ts`; reports the composed operational stages |
 | Boot and graceful-shutdown ordering | Implemented as an injectable composition boundary |
 | Spectrum, PostgreSQL, Codex, and Supermemory modules | Implemented and fake/unit/integration-testable in isolation |
 | Authorized receive through plan/execute/synthesize/send | Composed into the executable entrypoint; protected live path untested |
-| Clean local and Render first-message evidence | Not established |
-| Live Photon, Codex, Render, or Supermemory evidence | Not run for this release |
+| Clean local and Railway first-message evidence | Not established |
+| Live Photon, Codex, Railway, or Supermemory evidence | Not run for this release |
 
 The remainder of this document describes the composition contract and identifies where implementation evidence stops.
 
@@ -32,7 +32,7 @@ flowchart TB
   U["Authorized iMessage owner"] <--> P["Photon Spectrum Cloud"]
   P <-->|"persistent app.messages gRPC"| T["Spectrum receive loop"]
 
-  subgraph W["One Render Web Service"]
+  subgraph W["One Railway application service"]
     T --> A["authorize + durable ingest"]
     A --> Q["pg-boss workers"]
     Q --> I["interaction Codex runtime"]
@@ -41,7 +41,7 @@ flowchart TB
     H["/healthz and /readyz"]
   end
 
-  A --> DB[("Render PostgreSQL")]
+  A --> DB[("Railway PostgreSQL 18")]
   Q <--> DB
   O --> P
   I -. "bounded recall / curated writes" .-> SM["Supermemory"]
@@ -49,25 +49,24 @@ flowchart TB
   I <--> CH[("CODEX_HOME")]
   E <--> CH
 
-  R["Render health check"] --> H
+  R["Railway health check"] --> H
 ```
 
-The Blueprint deliberately provisions:
+The final Railway project deliberately uses:
 
-- one paid Web Service with `numInstances: 1`;
-- one PostgreSQL database connected through Render’s dynamic `DATABASE_URL` reference;
-- one disk mounted at `/var/data`;
+- one application service with one replica;
+- one PostgreSQL 18 service connected with `DATABASE_URL=${{Postgres.DATABASE_URL}}`;
+- one volume mounted at `/var/data`;
 - `CODEX_HOME=/var/data/codex` and `AGENT_WORKSPACE_ROOT=/var/data/workspaces`;
 - a pre-deploy `npm run db:migrate`; and
-- Render's platform-managed shutdown delay; disk-backed services cannot set a
-  custom `maxShutdownDelaySeconds` value in a Blueprint.
+- zero deployment overlap with a 90-second draining window.
 
-The disk makes v1 single-instance. PostgreSQL is independently durable and remains the operational source of truth. The disk is for Codex credentials/session files and workspaces, not queue truth.
+The volume-backed design makes v1 single-instance. PostgreSQL is independently durable and remains the operational source of truth. The volume is for Codex credentials/session files and workspaces, not queue truth.
 
 ## 3. Ownership and trust boundaries
 
 ```text
-PostgreSQL                              Persistent disk
+PostgreSQL                              Persistent volume
 ------------------------------------    ---------------------------------
 Accepted inbound/outbound content       CODEX_HOME config/auth/sessions
 Sender and space routing                Agent workspaces and artifacts
@@ -93,10 +92,10 @@ The final composition boundary starts the HTTP listener first so the process can
 
 ```mermaid
 sequenceDiagram
-  participant R as Render
+  participant R as Railway
   participant H as Health server
   participant B as Bootstrap coordinator
-  participant D as Disk and database
+  participant D as Volume and database
   participant C as Codex
   participant S as Spectrum
 
@@ -242,7 +241,7 @@ GET /readyz   -> 200 only when every critical component is ready
 GET /readyz   -> 503 with redacted component states and safe actions otherwise
 ```
 
-Critical readiness components are configuration, database, migrations, queue, Spectrum, Codex auth, Codex capabilities, disk, and workspace. Supermemory may be `disabled` or degraded without making operational readiness depend on semantic storage.
+Critical readiness components are configuration, database, migrations, queue, Spectrum, Codex auth, Codex capabilities, persistent storage (`disk` in the readiness contract), and workspace. Supermemory may be `disabled` or degraded without making operational readiness depend on semantic storage.
 
 Example setup response:
 
@@ -269,7 +268,7 @@ Example setup response:
 }
 ```
 
-Raw provider errors, credentials, handles, message content, and unrestricted paths never enter readiness. The root operator page renders only this redacted state and safe setup actions. Render uses `/healthz` to avoid turning incomplete private enrollment into a restart loop. Operators use `/readyz` as the acceptance gate.
+Raw provider errors, credentials, handles, message content, and unrestricted paths never enter readiness. The root operator page renders only this redacted state and safe setup actions. Railway uses `/healthz` to avoid turning incomplete private enrollment into a restart loop. Operators use `/readyz` as the acceptance gate.
 
 The current `src/server.ts` starts this health server first, runs each operational stage, and shuts the composition down on process signals. Its `/healthz` proves only that the HTTP process is alive; `/readyz` becomes `200` only after PostgreSQL, migrations, queue, Codex auth/capabilities, storage, and Spectrum are ready.
 
@@ -293,7 +292,7 @@ The executable bootstrap calls reconciliation before opening inbound acceptance,
 
 Supermemory timeout/outage behavior is included here as the intended operational contract. It was not validated in this release work because the user explicitly directed that testing to be skipped.
 
-### Persistent disk loss
+### Persistent volume loss
 
 1. Keep the service not ready.
 2. Recreate `CODEX_HOME` and workspaces with private permissions.
@@ -308,7 +307,7 @@ Mark only the affected thread reset, preserve its PostgreSQL summary, and create
 
 ### Rollback
 
-Database migrations are forward-compatible release artifacts. Roll back only to an application revision documented as compatible with the current schema. Preserve PostgreSQL, pg-boss state, the persistent disk, and outbound cursors. If compatibility is uncertain, ship a forward fix rather than attempting an improvised down migration.
+Database migrations are forward-compatible release artifacts. Roll back only to an application revision documented as compatible with the current schema. Preserve PostgreSQL, pg-boss state, the persistent volume, and outbound cursors. If compatibility is uncertain, ship a forward fix rather than attempting an improvised down migration.
 
 ## 10. Graceful shutdown
 
@@ -344,7 +343,7 @@ Bounded product extensions can add attachment normalization, additional slash co
 
 ## 12. Scaling path
 
-The current disk and private-auth design cannot safely run multiple Web Service instances. Before horizontal scaling:
+The current volume and private-auth design cannot safely run multiple application service instances. Before horizontal scaling:
 
 - move credentials to a supported per-worker/enterprise secret mechanism;
 - move or explicitly shard workspaces onto durable per-worker storage;
@@ -356,6 +355,6 @@ The starter intentionally does not pre-build this distributed topology.
 
 ## 13. Release evidence boundary
 
-Automated tests may verify deterministic module behavior with fakes and, when configured, a disposable PostgreSQL database. They do not establish that Render provisioned a clean account, Photon delivered/replayed a real event, Codex authenticated/resumed a live thread, or Supermemory persisted/deleted a live memory.
+Automated tests may verify deterministic module behavior with fakes and, when configured, a disposable PostgreSQL database. They do not establish that Railway provisioned a clean account, Photon delivered/replayed a real event, Codex authenticated/resumed a live thread, or Supermemory persisted/deleted a live memory.
 
 Release acceptance requires an integration entrypoint plus the protected E2E, chaos, rollback, restart, and clean-room documentation exercises in [TEST_PLAN.md](./TEST_PLAN.md). Until those are recorded, describe the provider paths as designed or locally simulated—not live-working.

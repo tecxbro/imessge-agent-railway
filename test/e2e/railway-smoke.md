@@ -1,4 +1,4 @@
-# Clean Local and Render Release Smoke
+# Clean Local and Railway Release Smoke
 
 Use this file as an evidence record, not as a statement that a check passed. Mark every row `PASS`, `FAIL`, `BLOCKED`, or `NOT RUN`, then attach redacted output. Never store secrets, auth files, owner handles, raw messages, database URLs, or full provider errors here.
 
@@ -12,12 +12,8 @@ Use this file as an evidence record, not as a statement that a check passed. Mar
 | Branch/tag | |
 | Node/npm versions | |
 | PostgreSQL version | |
-| Render CLI version/workspace | |
-| Render deploy ID | |
-
-## Known blocker on `feat/render-docs`
-
-`src/index.ts` provides the final injectable lifecycle, but `npm start` still executes `dist/server.js` built from the foundation `src/server.ts`. The current production entrypoint exposes `/healthz` and a redacted `/readyz`, but it does not compose the queue, Spectrum, Codex, memory, or security handlers, so readiness never becomes true. Therefore clean first-message, ready-state, restart-resume, and live Render agent gates must remain `BLOCKED` until the integration owner wires the production composition.
+| Railway CLI version/workspace | |
+| Railway deploy ID | |
 
 ## A. Offline preflight
 
@@ -28,7 +24,11 @@ git status --short --branch
 npm ci
 npm run typecheck
 npm test
+npm run test:security
+npm run test:integration
 npm run test:chaos
+npm run build
+npm run railway:validate
 git diff --check
 ```
 
@@ -38,11 +38,10 @@ Database integration tests require a disposable database and truncate applicatio
 POSTGRES_PIPELINE_TEST_DATABASE_URL=postgresql://<test-user>:<test-password>@127.0.0.1:5432/<disposable-test-db> npm run test:integration
 ```
 
-Blueprint validation requires an authenticated/default Render workspace:
+Official schema validation requires `check-jsonschema`:
 
 ```bash
-render workspace set
-npm run render:validate
+check-jsonschema --schemafile https://railway.com/railway.schema.json railway.json
 ```
 
 | Check | Status | Evidence/notes |
@@ -53,10 +52,11 @@ npm run render:validate
 | Database integration tests (not skipped) | | |
 | Chaos suite | | |
 | `git diff --check` | | |
-| Render Blueprint validation | | |
+| Railway configuration unit validation | | |
+| Official Railway JSON schema validation | | |
 | Secret scan | | |
 
-If Render CLI reports `no workspace specified and no default workspace set`, mark Blueprint validation `BLOCKED`; the YAML has not been validated.
+If the official schema cannot be fetched, mark schema validation `BLOCKED`; unit tests do not substitute for the live official schema.
 
 ## B. Clean local install
 
@@ -77,44 +77,42 @@ curl --silent --show-error http://127.0.0.1:10000/readyz
 | `CODEX_HOME` | absolute directory, mode `0700` | | |
 | Workspace root | separate absolute directory, mode `0700` | | |
 | Codex auth | chosen mode reported; no secret printed | | |
-| Operator page | HTTP 200; identifies setup/readiness status and never claims a foundation runtime is ready | | |
+| Operator page | HTTP 200; identifies setup/readiness status truthfully | | |
 | `/healthz` | HTTP 200 | | |
-| `/readyz` | HTTP 200 only after full composition | | |
+| `/readyz` | HTTP 200 only after every critical component is ready | | |
 | Authorized first message | one terminal response | | |
 | Unknown sender | zero Codex child processes | | |
 
-On the current branch, `/readyz` is expected to return HTTP 503. Its endpoint/redaction check can pass, but ready-state and both message checks remain `BLOCKED` by the uncomposed production entrypoint.
+## C. Clean Railway deployment
 
-## C. Clean Render Blueprint
-
-Create the Blueprint in a fresh Render workspace from the exact commit above.
+Create a Railway project from the exact commit above.
 
 | Check | Expected | Status | Evidence/notes |
 |---|---|---|---|
-| Resource count | one Web Service, one Postgres database | | |
-| Web plan/instances | paid service, exactly one instance | | |
-| Disk | one disk at `/var/data` | | |
+| Resource count | one application service, one PostgreSQL 18 service | | |
+| Application replicas | exactly one | | |
+| Volume | one volume at `/var/data` | | |
 | Codex path | `CODEX_HOME=/var/data/codex` | | |
 | Workspace path | `AGENT_WORKSPACE_ROOT=/var/data/workspaces` | | |
 | Database wiring | `DATABASE_URL` dynamic reference; no manual URL | | |
-| Required prompts | Photon project ID/secret plus application owner handles; no literal secrets in Blueprint | | |
-| Optional Supermemory | `SUPERMEMORY_API_KEY` appears in the initial Blueprint prompts; blank disables memory | | |
+| Required variables | preserved deployment ID/encryption key, Photon credentials, owner handles; no literal secrets in source | | |
+| Optional Supermemory | `SUPERMEMORY_API_KEY` absent disables memory; migrated prefix is preserved | | |
+| GitHub trigger | `main`, Wait for CI enabled before autodeploy | | |
 | Build | `npm ci --include=dev && npm run build` exits 0 | | |
 | Pre-deploy | `npm run db:migrate` exits 0 | | |
-| Start | `npm start` binds Render `PORT` | | |
+| Start | `npm start` binds Railway `PORT` | | |
 | Operator page | generated URL explains that it is not the iMessage chat link and reports truthful readiness | | |
 | Liveness | external `/healthz` HTTP 200 | | |
 | Initial readiness | 503 only for expected missing auth/dependency | | |
-
-Do not record the Render deployment as cleanly functional while `npm start` uses the foundation entrypoint.
 
 ## D. Codex enrollment and restart persistence
 
 ### ChatGPT mode
 
-In private Render Shell:
+In Railway SSH:
 
 ```bash
+railway ssh
 npm run codex:login
 npm run codex:status
 test -f "$CODEX_HOME/auth.json"
@@ -125,7 +123,7 @@ Restart/redeploy, then rerun `npm run codex:status` and inspect `/readyz`. Devic
 
 ### API-key mode
 
-Add `OPENAI_API_KEY` as a Render secret, set `CODEX_AUTH_MODE=api_key`, restart, and run the protected capability probe. Do not run device login and do not print the key.
+Add `OPENAI_API_KEY` as a Railway service variable, set `CODEX_AUTH_MODE=api_key`, restart, and run the protected capability probe. Do not run device login and do not print the key.
 
 | Check | Status | Evidence/notes |
 |---|---|---|
@@ -158,14 +156,14 @@ The dedicated memory-provider outage/Supermemory-timeout resilience exercise was
 
 | Provider | Status | Exact test/evidence | Live claim allowed? |
 |---|---|---|---|
-| Render | | clean Blueprint/deploy/restart record | only if passed |
+| Railway | | clean deploy/restart record | only if passed |
 | Photon/Spectrum | | protected authorized DM | only if passed |
 | Codex | | protected schema-bound run | only if passed |
 | Supermemory | | protected add/search/delete | only if passed |
 
 ## F. Failure and recovery matrix
 
-For process-kill tests, use a staging deployment/test database. Record the durable row/job state immediately before the kill, kill only the Web Service process/instance, restart it, and capture the reconciled terminal state. A test-only failure hook must be deterministic and excluded from production. If the integrated release has no hook at a stage, mark that stage `BLOCKED`; do not simulate it only in prose.
+For process-kill tests, use a staging deployment/test database. Record the durable row/job state immediately before the kill, kill only the application process/instance, restart it, and capture the reconciled terminal state. A test-only failure hook must be deterministic and excluded from production. If the integrated release has no hook at a stage, mark that stage `BLOCKED`; do not simulate it only in prose.
 
 | Failure point | Injection/evidence requirement | Expected invariant | Status |
 |---|---|---|---|
@@ -186,11 +184,11 @@ The fake transport verifies stable retry GUIDs; only a live provider test can es
 
 ## G. End-to-end restart
 
-After the composed entrypoint exists:
+After Railway readiness passes:
 
 1. Send an authorized turn that establishes a Codex thread and one non-sensitive durable preference.
 2. Record terminal chain/outbound state using safe IDs only.
-3. Restart the Render Web Service normally.
+3. Restart the Railway application service normally.
 4. Require `/healthz` and `/readyz` HTTP 200.
 5. Send a follow-up that requires prior context.
 6. Verify the persisted thread or bounded recovery summary is used, the memory remains owner-scoped, and no outbound part duplicates.
@@ -230,7 +228,7 @@ After the composed entrypoint exists:
 | Gate | Status | Reason/evidence |
 |---|---|---|
 | Clean local | | |
-| Clean Render | | |
+| Clean Railway | | |
 | Restart recovery | | |
 | Every failure stage | | |
 | Security/secret boundary | | |
@@ -238,4 +236,4 @@ After the composed entrypoint exists:
 
 **Decision:** `GO` / `NO-GO`
 
-A `GO` requires every required gate to pass. Any uncomposed entrypoint, skipped required database test, missing failure-stage evidence, or unsupported live-provider claim is `NO-GO`.
+A `GO` requires every required gate to pass. Any skipped required database test, missing failure-stage evidence, or unsupported live-provider claim is `NO-GO`.
