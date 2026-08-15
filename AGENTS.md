@@ -11,7 +11,7 @@ Production-oriented private iMessage agent starter. Keep every module justified 
 
 ## Repository identity and Git safety
 
-- The only GitHub publish target is `tecxbro/iMessage-agent-render`.
+- The only GitHub publish target is `tecxbro/imessge-agent-railway`.
 - Never infer the publish target from a remote name. Before every push, run `npm run repo:verify-target`; proceed only when it reports the canonical repository.
 - Keep `.githooks/pre-push` enabled through `core.hooksPath=.githooks`; it must reject every noncanonical push URL.
 - Never force-push `main` or bypass the pre-push hook with `--no-verify`.

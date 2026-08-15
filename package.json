@@ -1,5 +1,5 @@
 {
-  "name": "imessage-codex-agent-render",
+  "name": "imessage-codex-agent",
   "version": "0.1.0",
   "private": true,
   "description": "Production-oriented private iMessage agent starter powered by Spectrum and Codex",

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 
-const EXPECTED_REPOSITORY = "tecxbro/imessage-agent-render";
-const EXPECTED_URL = "https://github.com/tecxbro/iMessage-agent-render.git";
+const EXPECTED_REPOSITORY = "tecxbro/imessge-agent-railway";
+const EXPECTED_URL = "https://github.com/tecxbro/imessge-agent-railway.git";
 
 function repositoryFromUrl(remoteUrl) {
   const candidate = remoteUrl.trim().replace(/\.git$/iu, "");

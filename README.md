@@ -5,7 +5,7 @@ A production-oriented, single-owner iMessage agent starter built around Photon S
 ## Repository identity
 
 The canonical GitHub publish target is
-[`tecxbro/iMessage-agent-render`](https://github.com/tecxbro/iMessage-agent-render).
+[`tecxbro/imessge-agent-railway`](https://github.com/tecxbro/imessge-agent-railway).
 After a fresh clone, run `npm run repo:setup-guards`. This enables the versioned
 pre-push hook and makes `origin` the default push remote. Before every push, run
 `npm run repo:verify-target`; the command and hook both fail closed when the
@@ -109,8 +109,8 @@ Never commit `.env`, `$CODEX_HOME/auth.json`, provider credentials, database URL
 ### Install and configure
 
 ```bash
-git clone https://github.com/tecxbro/iMessage-agent-render.git
-cd iMessage-agent-render
+git clone https://github.com/tecxbro/imessge-agent-railway.git
+cd imessge-agent-railway
 cp .env.example .env
 npm ci
 npm run repo:setup-guards

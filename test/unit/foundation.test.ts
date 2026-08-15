@@ -27,7 +27,7 @@ describe("repository foundation", () => {
       ...Object.values(manifest.devDependencies),
     ];
 
-    expect(manifest.name).toBe("imessage-codex-agent-render");
+    expect(manifest.name).toBe("imessage-codex-agent");
     expect(manifest.engines.node).toBe("22.12.0");
     expect(versions.every((version) => /^\d+\.\d+\.\d+$/u.test(version))).toBe(
       true,

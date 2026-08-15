@@ -15,9 +15,9 @@ function verify(url: string) {
 
 describe("repository push-target guard", () => {
   it.each([
-    "https://github.com/tecxbro/iMessage-agent-render.git",
-    "git@github.com:tecxbro/iMessage-agent-render.git",
-    "ssh://git@github.com/tecxbro/iMessage-agent-render.git",
+    "https://github.com/tecxbro/imessge-agent-railway.git",
+    "git@github.com:tecxbro/imessge-agent-railway.git",
+    "ssh://git@github.com/tecxbro/imessge-agent-railway.git",
   ])("accepts the canonical repository via %s", (url) => {
     const result = verify(url);
 
@@ -27,14 +27,14 @@ describe("repository push-target guard", () => {
 
   it.each([
     "https://github.com/tecxbro/iMessage-boiler-plate-.git",
-    "https://github.com/tecxbro/iMessageagent-render-blueprint.git",
+    "https://github.com/tecxbro/unrelated-agent-blueprint.git",
     "DISABLED",
   ])("rejects a noncanonical push URL via %s", (url) => {
     const result = verify(url);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("PUSH_TARGET_MISMATCH");
-    expect(result.stderr).toContain("iMessage-agent-render.git");
+    expect(result.stderr).toContain("imessge-agent-railway.git");
   });
 
   it("does not echo credentials from a malformed remote URL", () => {
