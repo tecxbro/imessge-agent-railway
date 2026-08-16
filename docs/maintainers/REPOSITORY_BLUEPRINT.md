@@ -7,7 +7,8 @@ imessage-codex-agent-boilerplate/
 ├── .env.example
 ├── .gitignore
 ├── AGENTS.md
-├── ARCHITECTURE.md
+├── CONTRIBUTING.md
+├── LICENSE
 ├── README.md
 ├── SECURITY.md
 ├── package.json
@@ -16,16 +17,28 @@ imessage-codex-agent-boilerplate/
 ├── tsconfig.json
 ├── drizzle.config.ts
 ├── docs/
-│   ├── PRD.md
-│   ├── IMPLEMENTATION_PLAN.md
-│   ├── DEPLOYMENT_AND_AUTH.md
-│   ├── MODEL_ROUTING.md
-│   ├── MEMORY.md
-│   ├── TEST_PLAN.md
-│   ├── BUSINESS_PROSPECTS.md
-│   ├── DOCS_INDEX.md
-│   ├── CONVEX_VARIANT.md
-│   └── llms.txt
+│   ├── README.md
+│   ├── DEPLOYMENT.md
+│   ├── CONFIGURATION.md
+│   ├── CUSTOMIZATION.md
+│   ├── ARCHITECTURE.md
+│   ├── OPERATIONS.md
+│   ├── TROUBLESHOOTING.md
+│   ├── SECURITY_AND_PRIVACY.md
+│   ├── llms.txt
+│   └── maintainers/
+│       ├── PRD.md
+│       ├── IMPLEMENTATION_PLAN.md
+│       ├── TEST_PLAN.md
+│       ├── DECISIONS.md
+│       ├── DATA_MODEL.md
+│       ├── MODEL_ROUTING.md
+│       ├── PROMPTING_AND_ORCHESTRATION.md
+│       ├── REPOSITORY_BLUEPRINT.md
+│       ├── CONVEX_VARIANT.md
+│       ├── BUSINESS_PROSPECTS.md
+│       ├── PROVIDER_REFERENCES.md
+│       └── SKILLS.md
 ├── prompts/
 │   ├── interaction.system.md
 │   ├── execution.system.md

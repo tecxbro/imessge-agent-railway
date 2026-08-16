@@ -15,6 +15,8 @@ function daysBefore(now: Date, days: number): Date {
 
 export function createRetentionHandler(dependencies: RetentionHandlerDependencies) {
   return async (_payload: MaintenanceRetentionPayload): Promise<void> => {
+    // Retention is repository-owned so raw content, failure evidence, and usage
+    // age out under one database policy rather than ad hoc provider deletion.
     const now = dependencies.now?.() ?? new Date();
     await dependencies.retention.applyRetention({
       rawContentBefore: daysBefore(now, dependencies.rawMessageRetentionDays),

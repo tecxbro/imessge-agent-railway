@@ -16,7 +16,7 @@ function validEnvironment(
     SPECTRUM_PROJECT_ID: "spectrum-project",
     SPECTRUM_PROJECT_SECRET: "spectrum-secret",
     DATABASE_URL: "postgresql://agent:password@localhost:5432/agent",
-    AGENT_OWNER_HANDLES: "+15551234567,Owner@Example.com",
+    OWNER_PHONE_NUMBER: "+15551234567",
     DEPLOYMENT_ID: "00000000-0000-4000-8000-000000000001",
     APP_ENCRYPTION_KEY: "00".repeat(32),
     CODEX_HOME: "./.codex-agent",
@@ -31,10 +31,8 @@ describe("loadEnvironment", () => {
   it("normalizes documented defaults, handles, paths, and model profiles", () => {
     const environment = loadEnvironment(validEnvironment());
 
-    expect(environment.AGENT_OWNER_HANDLES).toEqual([
-      "+15551234567",
-      "owner@example.com",
-    ]);
+    expect(environment.OWNER_PHONE_NUMBER).toBe("+15551234567");
+    expect(environment.AGENT_OWNER_HANDLES).toEqual(["+15551234567"]);
     expect(environment.CODEX_HOME).toBe(resolve(".codex-agent"));
     expect(environment.AGENT_WORKSPACE_ROOT).toBe(
       resolve(".agent-workspaces"),
@@ -58,10 +56,7 @@ describe("loadEnvironment", () => {
     expect(error).toBeInstanceOf(EnvironmentValidationError);
     const message = (error as Error).message;
     for (const variable of [
-      "SPECTRUM_PROJECT_ID",
-      "SPECTRUM_PROJECT_SECRET",
       "DATABASE_URL",
-      "AGENT_OWNER_HANDLES",
       "DEPLOYMENT_ID",
       "APP_ENCRYPTION_KEY",
       "CODEX_HOME",
@@ -75,7 +70,7 @@ describe("loadEnvironment", () => {
 
   it.each([
     ["database protocol", { DATABASE_URL: "https://database.example.com" }],
-    ["owner handle", { AGENT_OWNER_HANDLES: "not-a-handle" }],
+    ["owner phone", { OWNER_PHONE_NUMBER: "not-a-phone" }],
     ["encryption key", { APP_ENCRYPTION_KEY: "too-short" }],
     ["filesystem root", { CODEX_HOME: "/" }],
     ["path traversal", { AGENT_WORKSPACE_ROOT: "../outside" }],
@@ -107,6 +102,51 @@ describe("loadEnvironment", () => {
         }),
       ).CODEX_AUTH_MODE,
     ).toBe("api_key");
+  });
+
+  it("allows initial boot without Spectrum credentials", () => {
+    const environment = loadEnvironment(
+      validEnvironment({
+        SPECTRUM_PROJECT_ID: undefined,
+        SPECTRUM_PROJECT_SECRET: undefined,
+      }),
+    );
+
+    expect(environment.SPECTRUM_PROJECT_ID).toBeUndefined();
+    expect(environment.SPECTRUM_PROJECT_SECRET).toBeUndefined();
+  });
+
+  it("uses AGENT_OWNER_HANDLES only as a backwards-compatible fallback", () => {
+    const environment = loadEnvironment(
+      validEnvironment({
+        OWNER_PHONE_NUMBER: undefined,
+        AGENT_OWNER_HANDLES: "+15557654321,Owner@Example.com",
+      }),
+    );
+
+    expect(environment.AGENT_OWNER_HANDLES).toEqual([
+      "+15557654321",
+      "owner@example.com",
+    ]);
+  });
+
+  it("requires a new owner phone number or the legacy owner fallback", () => {
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          OWNER_PHONE_NUMBER: undefined,
+          AGENT_OWNER_HANDLES: undefined,
+        }),
+      ),
+    ).toThrow(/OWNER_PHONE_NUMBER is required/);
+  });
+
+  it("requires legacy Spectrum credentials to be supplied as a pair", () => {
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({ SPECTRUM_PROJECT_SECRET: undefined }),
+      ),
+    ).toThrow(/must either both be set or both be omitted/);
   });
 
   it("derives a stable private deployment UUID from Railway's service ID", () => {

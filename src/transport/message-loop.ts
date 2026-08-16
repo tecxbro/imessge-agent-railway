@@ -1,3 +1,10 @@
+/**
+ * Spectrum intake boundary.
+ *
+ * The receive loop only normalizes, filters, authorizes, persists, and
+ * schedules. It must never perform model or memory work inline. Consecutive
+ * restart counts reset only after a provider event is processed successfully.
+ */
 import type { Message, Space } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 

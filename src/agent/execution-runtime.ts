@@ -149,6 +149,8 @@ export class ExecutionRuntime {
   public async run(
     request: ExecutionRuntimeRequest,
   ): Promise<ExecutionRuntimeRunResult> {
+    // Resolve the code-owned workspace and maximum permission grant before any
+    // untrusted task purpose or instructions reach Codex.
     const binding = request.task.workspaceBinding ?? request.task.agentName;
     const workspace = await resolveWorkspace(request.workspaceRoot, binding);
     const permissionProfile = enforcePermissionGrant(

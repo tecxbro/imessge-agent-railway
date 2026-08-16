@@ -84,6 +84,8 @@ export class GracefulShutdown {
   }
 
   async #run(): Promise<ShutdownResult> {
+    // Close readiness and broadcast cancellation before running hooks. Lower
+    // priorities stop dependents first; HTTP remains available until last.
     this.readiness.beginShutdown();
     this.#abortController.abort(new Error("Service shutdown requested"));
     const failures: ShutdownFailure[] = [];

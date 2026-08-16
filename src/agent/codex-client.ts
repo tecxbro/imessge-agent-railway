@@ -427,6 +427,8 @@ export class CodexClient implements StructuredCodexRunner {
   public async runStructured<Output>(
     request: CodexRunRequest<Output>,
   ): Promise<CodexRunResult<Output>> {
+    // All Codex thread start/resume calls cross this boundary so environment,
+    // permissions, concurrency, time, output, and cancellation limits agree.
     const requestedRuntime = requirePositiveInteger(
       request.maximumRuntimeMs ?? this.maximumRuntimeMs,
       "Codex task runtime",

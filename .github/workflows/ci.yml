@@ -46,6 +46,7 @@ jobs:
       - run: npm run build
       - run: npm run railway:validate
       - run: npx vitest run test/unit/provider-cleanup.test.ts
+      - run: npm run docs:check
 
       - uses: actions/setup-python@v5
         with:

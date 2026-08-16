@@ -4,12 +4,12 @@ Production-oriented private iMessage agent starter. Keep every module justified 
 
 ## Before editing
 
-- Read `README.md`, `ARCHITECTURE.md`, the relevant `IMPLEMENTATION_PLAN.md` section, and primary integration docs in `DOCS_INDEX.md`.
+- Read `README.md`, `docs/ARCHITECTURE.md`, the relevant `docs/maintainers/IMPLEMENTATION_PLAN.md` section, and primary integration docs in `docs/maintainers/PROVIDER_REFERENCES.md`.
 - Confirm checkout boundaries with `git status --short --branch`, `git branch --show-current`, and `git worktree list`.
 - Edit only files owned by this worktree; do not change another worktree to help.
-- Run `npm run repo:setup-guards` after a fresh clone, then run the nearest existing tests before behavior changes.
+- Run the nearest existing tests before behavior changes.
 
-## Repository identity and Git safety
+## Git safety
 
 - The only GitHub publish target is `tecxbro/imessge-agent-railway`.
 - Never infer the publish target from a remote name. Before every push, run `npm run repo:verify-target`; proceed only when it reports the canonical repository.
@@ -74,7 +74,6 @@ Production-oriented private iMessage agent starter. Keep every module justified 
 ## Required checks
 
 ```bash
-npm run repo:verify-target
 npm run typecheck
 npm test
 npm run test:integration

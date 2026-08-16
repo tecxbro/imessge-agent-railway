@@ -12,7 +12,7 @@ The dangerous bugs are not “the model gave an imperfect answer.” They are:
 - A model broadens its own permissions or approves its own action.
 - A restart loses ChatGPT auth, Codex context, routing, or send state.
 
-The test plan therefore treats models and providers as replaceable dependencies and verifies application invariants under failure.
+The test plan therefore treats models and providers as replaceable dependencies and verifies application invariants under failure. The executable production runtime is composed; clean-account Railway deployment and protected live-provider tests remain separate evidence gates.
 
 ## 2. Test layers
 

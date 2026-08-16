@@ -69,7 +69,15 @@ describe("production executable entrypoint", () => {
       status: "ready",
     });
 
-    const deployment = await fetch(`http://127.0.0.1:${address.port}/`);
-    expect(await deployment.text()).toContain("Agent ready");
+    const root = await fetch(`http://127.0.0.1:${address.port}/`, {
+      redirect: "manual",
+    });
+    expect(root.status).toBe(302);
+    expect(root.headers.get("location")).toBe("/agent/dashboard");
+
+    const deployment = await fetch(
+      `http://127.0.0.1:${address.port}/agent/dashboard`,
+    );
+    expect(await deployment.text()).toContain("iMessage Agent");
   });
 });

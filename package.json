@@ -2,10 +2,11 @@
   "name": "imessage-codex-agent",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Production-oriented private iMessage agent starter powered by Spectrum and Codex",
   "type": "module",
   "engines": {
-    "node": "22.12.0"
+    "node": "^22.12.0 || >=24.0.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -16,13 +17,14 @@
     "test:security": "vitest run test/security --maxWorkers=1",
     "test:integration": "vitest run test/integration --maxWorkers=1",
     "test:chaos": "vitest run test/chaos",
-    "repo:setup-guards": "node scripts/install-git-guards.mjs",
-    "repo:verify-target": "node scripts/verify-push-target.mjs",
+    "docs:check": "node scripts/check-docs.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "codex:login": "codex login --device-auth",
     "codex:status": "codex login status",
-    "railway:validate": "vitest run test/unit/railway-config.test.ts"
+    "railway:validate": "vitest run test/unit/railway-config.test.ts",
+    "repo:verify-target": "node scripts/verify-push-target.mjs",
+    "repo:setup-guards": "node scripts/install-git-guards.mjs"
   },
   "dependencies": {
     "@openai/codex": "0.147.0",

@@ -3,8 +3,10 @@ import {
   SpectrumReadiness,
   type ReadinessState,
 } from "./http/readiness.js";
+import type { ChatGptSetupController } from "./agent/codex-app-server-auth.js";
 import { startHealthServer, type HealthServer } from "./http/server.js";
 import type { DeploymentPageOptions } from "./http/deployment-page.js";
+import type { PhotonSetupController } from "./transport/photon-setup.js";
 import {
   GracefulShutdown,
   installShutdownSignals,
@@ -51,6 +53,8 @@ export interface StartAgentServiceOptions {
   host?: string;
   bootstrap: AgentServiceBootstrap;
   deploymentPage?: Omit<DeploymentPageOptions, "runtimeMode">;
+  photonSetup?: PhotonSetupController;
+  chatgptSetup?: ChatGptSetupController;
   installSignalHandlers?: boolean;
   onStartupFailure?: (code: string) => void;
 }
@@ -74,9 +78,12 @@ async function runStartupStage(
 }
 
 /**
- * Owns final boot ordering without importing provider-specific application
- * handlers. The integration worktree supplies the composed pipeline through
- * AgentServiceBootstrap after shared contracts have merged.
+ * Owns provider-neutral boot and shutdown ordering.
+ *
+ * HTTP starts first so `/healthz` remains available while private dependencies
+ * initialize. Spectrum starts only after Codex authentication and capability
+ * checks pass. Shutdown hooks are registered in reverse dependency order so
+ * intake and active work stop before queues, PostgreSQL, and HTTP close.
  */
 export async function startAgentService(
   options: StartAgentServiceOptions,
@@ -96,6 +103,12 @@ export async function startAgentService(
       }),
       runtimeMode: "agent",
     },
+    ...(options.photonSetup === undefined
+      ? {}
+      : { photonSetup: options.photonSetup }),
+    ...(options.chatgptSetup === undefined
+      ? {}
+      : { chatgptSetup: options.chatgptSetup }),
   });
 
   shutdown.register({
@@ -104,6 +117,96 @@ export async function startAgentService(
     timeoutMs: 10_000,
     stop: () => health.close(),
   });
+
+  let startupStagesReady = false;
+  let codexChecked = false;
+  let codexReady = false;
+  let spectrumStarted = false;
+  let unlockAgain = false;
+  let forceCodexProbe = false;
+  let unlockPromise: Promise<void> | undefined;
+
+  const photonConnected = (): boolean =>
+    options.photonSetup === undefined ||
+    options.photonSetup.status().state === "connected";
+
+  const refreshCodexReadiness = async (): Promise<boolean> => {
+    codexChecked = true;
+    readiness.mark("codexAuth", "starting");
+    readiness.mark("codexCapabilities", "starting");
+    let codex: CodexStartupState;
+    try {
+      codex = await options.bootstrap.checkCodex();
+    } catch {
+      codexReady = false;
+      readiness.mark("codexAuth", "failed", "CODEX_AUTH_EXPIRED");
+      readiness.mark(
+        "codexCapabilities",
+        "failed",
+        "CODEX_CAPABILITY_FAILED",
+      );
+      options.onStartupFailure?.("CODEX_CHECK_FAILED");
+      spectrumReadiness.markStopped();
+      return false;
+    }
+    readiness.mark("codexAuth", codex.auth, codex.authCode);
+    readiness.mark(
+      "codexCapabilities",
+      codex.capabilities,
+      codex.capabilityCode,
+    );
+    codexReady = codex.auth === "ok" && codex.capabilities === "ok";
+    return codexReady;
+  };
+
+  const tryUnlockAgent = async (forceProbe: boolean): Promise<void> => {
+    if (!startupStagesReady || shutdown.signal.aborted || spectrumStarted) {
+      return;
+    }
+
+    if (forceProbe || !codexChecked) {
+      if (!(await refreshCodexReadiness())) {
+        return;
+      }
+    }
+
+    if (!codexReady || !photonConnected() || shutdown.signal.aborted) {
+      spectrumReadiness.markStopped();
+      return;
+    }
+
+    spectrumStarted = true;
+    spectrumReadiness.markStarting();
+    try {
+      await options.bootstrap.startSpectrum({
+        signal: shutdown.signal,
+        readiness: spectrumReadiness,
+      });
+    } catch {
+      spectrumStarted = false;
+      spectrumReadiness.markDegraded("SPECTRUM_STREAM_DISCONNECTED", 1);
+      options.onStartupFailure?.("SPECTRUM_START_FAILED");
+    }
+  };
+
+  const requestUnlock = (forceProbe: boolean): Promise<void> => {
+    unlockAgain = true;
+    forceCodexProbe ||= forceProbe;
+    unlockPromise ??= (async () => {
+      while (unlockAgain && !shutdown.signal.aborted) {
+        const probe = forceCodexProbe;
+        unlockAgain = false;
+        forceCodexProbe = false;
+        await tryUnlockAgent(probe);
+      }
+    })().finally(() => {
+      unlockPromise = undefined;
+    });
+    return unlockPromise;
+  };
+
+  options.photonSetup?.onConnected?.(() => requestUnlock(false));
+  options.chatgptSetup?.onConnected(() => requestUnlock(true));
 
   try {
     readiness.mark("configuration", "starting");
@@ -121,6 +224,14 @@ export async function startAgentService(
     );
     readiness.mark("disk", "ok");
     readiness.mark("workspace", "ok");
+    if (options.bootstrap.stopCodex !== undefined) {
+      shutdown.register({
+        name: "codex",
+        priority: 20,
+        timeoutMs: 15_000,
+        stop: options.bootstrap.stopCodex,
+      });
+    }
 
     readiness.mark("database", "starting");
     await runStartupStage(
@@ -163,22 +274,13 @@ export async function startAgentService(
         stop: options.bootstrap.checkpointOutbound,
       });
     }
-
-    readiness.mark("codexAuth", "starting");
-    readiness.mark("codexCapabilities", "starting");
-    const codex = await options.bootstrap.checkCodex();
-    readiness.mark("codexAuth", codex.auth, codex.authCode);
-    readiness.mark(
-      "codexCapabilities",
-      codex.capabilities,
-      codex.capabilityCode,
-    );
-    if (options.bootstrap.stopCodex !== undefined) {
+    await refreshCodexReadiness();
+    if (options.bootstrap.stopSpectrum !== undefined) {
       shutdown.register({
-        name: "codex",
-        priority: 20,
-        timeoutMs: 15_000,
-        stop: options.bootstrap.stopCodex,
+        name: "spectrum",
+        priority: 10,
+        timeoutMs: 10_000,
+        stop: options.bootstrap.stopSpectrum,
       });
     }
 
@@ -188,26 +290,10 @@ export async function startAgentService(
       memoryState,
       memoryState === "failed" ? "SUPERMEMORY_CONFIGURATION_INVALID" : undefined,
     );
-
-    if (codex.auth === "ok" && codex.capabilities === "ok") {
-      spectrumReadiness.markStarting();
-      await runStartupStage("SPECTRUM_START_FAILED", () =>
-        options.bootstrap.startSpectrum({
-          signal: shutdown.signal,
-          readiness: spectrumReadiness,
-        }),
-      );
-      if (options.bootstrap.stopSpectrum !== undefined) {
-        shutdown.register({
-          name: "spectrum",
-          priority: 10,
-          timeoutMs: 10_000,
-          stop: options.bootstrap.stopSpectrum,
-        });
-      }
-    } else {
-      spectrumReadiness.markStopped();
-    }
+    startupStagesReady = true;
+    await requestUnlock(
+      options.chatgptSetup?.status().state === "connected" && !codexReady,
+    );
   } catch (error) {
     const code =
       error instanceof StartupStageError ? error.code : "STARTUP_FAILED";

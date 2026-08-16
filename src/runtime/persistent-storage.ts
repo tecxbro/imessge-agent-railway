@@ -133,6 +133,8 @@ export async function preparePersistentStorage(input: {
   workspaceRoot: string;
   authMode: CodexAuthMode;
 }): Promise<PersistentStorageLayout> {
+  // Credentials and workspaces are separate private roots so repository tasks
+  // cannot traverse into Codex authentication/session storage.
   const codexHome = resolve(input.codexHome);
   const workspaceRoot = resolve(input.workspaceRoot);
   if (!isAbsolute(input.codexHome) || !isAbsolute(input.workspaceRoot)) {

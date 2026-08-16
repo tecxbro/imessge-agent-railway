@@ -42,6 +42,8 @@ export function createOutboundSendHandler(dependencies: OutboundSendDependencies
     payload: OutboundSendPayload,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<void> => {
+    // Claim, send, then checkpoint each materialized part. The cursor must not
+    // advance before provider acknowledgement, even when the worker retries.
     try {
       while (!signal.aborted) {
         const part = await dependencies.outbound.claimNextPart(

@@ -1,3 +1,9 @@
+/**
+ * Executable production entrypoint.
+ *
+ * `src/index.ts` owns provider-neutral lifecycle ordering, while
+ * `production-bootstrap.ts` supplies the real provider and storage adapters.
+ */
 import { pathToFileURL } from "node:url";
 
 import {
@@ -34,6 +40,10 @@ async function main(): Promise<void> {
       supermemoryConfigured:
         runtime.environment.SUPERMEMORY_API_KEY !== undefined,
     },
+    photonSetup: runtime.photonSetup,
+    ...(runtime.chatgptSetup === undefined
+      ? {}
+      : { chatgptSetup: runtime.chatgptSetup }),
     onStartupFailure: (code) => {
       runtime.logger.error(
         { component: "bootstrap", errorCode: code },

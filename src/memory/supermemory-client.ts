@@ -341,6 +341,8 @@ export class SupermemoryClient implements SupermemoryPort {
     containerTag: string,
     signal?: AbortSignal,
   ): Promise<MemoryProfile> {
+    // Validate every provider boundary and retry only bounded reads; writes are
+    // not blindly retried because duplicate semantic records are durable.
     const tag = containerTagSchema.parse(containerTag);
     try {
       const response = await this.sdk.profile(

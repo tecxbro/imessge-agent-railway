@@ -5,35 +5,39 @@
 ## Start here
 
 - [Repository overview](../README.md)
-- [Architecture](../ARCHITECTURE.md)
-- [Implementation plan](../IMPLEMENTATION_PLAN.md)
+- [Architecture](./ARCHITECTURE.md)
+- [Implementation plan](./maintainers/IMPLEMENTATION_PLAN.md)
 - [Agent rules](../AGENTS.md)
-- [Architecture decisions](../DECISIONS.md)
+- [Architecture decisions](./maintainers/DECISIONS.md)
 
 ## Product and runtime contracts
 
-- [Product requirements](../PRD.md)
-- [Data model](../DATA_MODEL.md)
-- [Repository blueprint](../REPOSITORY_BLUEPRINT.md)
-- [Model routing](../MODEL_ROUTING.md)
-- [Prompting and orchestration](../PROMPTING_AND_ORCHESTRATION.md)
-- [Skills](../SKILLS.md)
-- [Convex alternative](../CONVEX_VARIANT.md)
+- [Product requirements](./maintainers/PRD.md)
+- [Data model](./maintainers/DATA_MODEL.md)
+- [Repository blueprint](./maintainers/REPOSITORY_BLUEPRINT.md)
+- [Model routing](./maintainers/MODEL_ROUTING.md)
+- [Prompting and orchestration](./maintainers/PROMPTING_AND_ORCHESTRATION.md)
+- [Skills](./maintainers/SKILLS.md)
+- [Convex alternative](./maintainers/CONVEX_VARIANT.md)
 
 ## Deploy, operate, secure, and test
 
-- [Deployment and Codex authentication](../DEPLOYMENT_AND_AUTH.md)
+- [Deployment and Codex authentication](./DEPLOYMENT.md)
 - [Operations runbook](./OPERATIONS.md)
-- [Security and privacy](../SECURITY_AND_PRIVACY.md)
-- [Test plan](../TEST_PLAN.md)
+- [Configuration reference](./CONFIGURATION.md)
+- [Customization guide](./CUSTOMIZATION.md)
+- [Troubleshooting](./TROUBLESHOOTING.md)
+- [Security and privacy](./SECURITY_AND_PRIVACY.md)
+- [Test plan](./maintainers/TEST_PLAN.md)
 - [Railway smoke evidence checklist](../test/e2e/railway-smoke.md)
 - [Railway service configuration](../railway.json)
-- [Primary external documentation index](../DOCS_INDEX.md)
+- [Primary external documentation index](./maintainers/PROVIDER_REFERENCES.md)
 
 ## Implementation entrypoints
 
-- [`src/index.ts`](../src/index.ts) — injectable boot/readiness/shutdown composition
-- [`src/server.ts`](../src/server.ts) — composed production entrypoint used by `npm start`
+- [`src/server.ts`](../src/server.ts) — executable production entrypoint; loads the production runtime and starts the staged lifecycle
+- [`src/index.ts`](../src/index.ts) — generic boot/readiness/shutdown ordering used by the production entrypoint
+- [`src/runtime/production-bootstrap.ts`](../src/runtime/production-bootstrap.ts) — production composition root for PostgreSQL, pg-boss, Codex, optional Supermemory, authorization, workers, and Spectrum
 - [`src/http/server.ts`](../src/http/server.ts) — composed `/healthz` and `/readyz` handlers
 - [`src/runtime/persistent-storage.ts`](../src/runtime/persistent-storage.ts) — Codex and workspace volume policy
 - [`src/runtime/graceful-shutdown.ts`](../src/runtime/graceful-shutdown.ts) — bounded stop hooks

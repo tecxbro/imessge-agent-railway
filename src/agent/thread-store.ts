@@ -111,6 +111,8 @@ export class ThreadStore {
   public async run<Output>(
     request: RunStoredThreadRequest<Output>,
   ): Promise<StoredThreadRunResult<Output>> {
+    // Serialize each logical scope so concurrent jobs cannot fork its persisted
+    // thread state; recover a missing session only from the bounded DB summary.
     const key = codexThreadScopeKey(request.scope);
     return await this.withScopeLock(key, async () => {
       const stored = await this.repository.get(key);

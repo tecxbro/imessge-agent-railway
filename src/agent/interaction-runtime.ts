@@ -35,6 +35,8 @@ export class InteractionRuntime {
   public async run(
     request: InteractionRuntimeRequest,
   ): Promise<InteractionRuntimeResult> {
+    // Interaction threads are read-only decision makers; repository execution
+    // remains in separately permissioned execution threads.
     const prompt = buildPrompt({
       title: "Private iMessage interaction turn",
       sections: request.sections,

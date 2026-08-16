@@ -16,11 +16,11 @@ summary: Implement or review Codex SDK/CLI authentication, threads, model profil
 
 ## Read first
 
-- `MODEL_ROUTING.md`
-- `DEPLOYMENT_AND_AUTH.md`
-- `SECURITY_AND_PRIVACY.md`
-- `IMPLEMENTATION_PLAN.md`, Step 4
-- `DOCS_INDEX.md`, OpenAI Codex section
+- `docs/maintainers/MODEL_ROUTING.md`
+- `docs/DEPLOYMENT.md`
+- `docs/SECURITY_AND_PRIVACY.md`
+- `docs/maintainers/IMPLEMENTATION_PLAN.md`, Step 4
+- `docs/maintainers/PROVIDER_REFERENCES.md`, OpenAI Codex section
 - Current official Codex auth, SDK, sandbox, approval, config, AGENTS, and skills Markdown
 
 ## Rules

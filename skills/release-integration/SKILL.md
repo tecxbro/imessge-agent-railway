@@ -15,11 +15,11 @@ summary: Merge parallel worktrees safely, execute recovery/security evidence, va
 
 ## Read first
 
-- `IMPLEMENTATION_PLAN.md`
-- `TEST_PLAN.md`
-- `DECISIONS.md`
+- `docs/maintainers/IMPLEMENTATION_PLAN.md`
+- `docs/maintainers/TEST_PLAN.md`
+- `docs/maintainers/DECISIONS.md`
 - `AGENTS.md`
-- `DEPLOYMENT_AND_AUTH.md`
+- `docs/DEPLOYMENT.md`
 
 ## Git safety
 

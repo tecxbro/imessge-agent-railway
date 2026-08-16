@@ -248,6 +248,8 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
     payload: TurnPlanPayload,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<void> => {
+    // Queue payloads carry only identity/version hints. Reload every prompt,
+    // routing, authorization, and capability input from authoritative storage.
     const context = await dependencies.repository.loadPlanContext(payload);
     if (context === null) {
       return;

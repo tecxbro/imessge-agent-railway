@@ -28,7 +28,7 @@ describe("repository foundation", () => {
     ];
 
     expect(manifest.name).toBe("imessage-codex-agent");
-    expect(manifest.engines.node).toBe("22.12.0");
+    expect(manifest.engines.node).toBe("^22.12.0 || >=24.0.0");
     expect(versions.every((version) => /^\d+\.\d+\.\d+$/u.test(version))).toBe(
       true,
     );

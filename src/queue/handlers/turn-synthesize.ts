@@ -187,6 +187,8 @@ export function createTurnSynthesizeHandler(
     payload: TurnSynthesizePayload,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<void> => {
+    // Synthesis consumes terminal durable results and materializes every bubble
+    // before publishing delivery, preventing a retry from regenerating text.
     const context = await dependencies.repository.loadSynthesisContext(payload);
     if (context === null) {
       return;

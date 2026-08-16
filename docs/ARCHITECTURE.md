@@ -172,17 +172,17 @@ The `turn.plan` handler:
 5. run the interaction Codex thread with structured output; and
 6. either materialize a direct response or enqueue bounded execution tasks.
 
-The schemas, prompt builder, model router, interaction runtime, memory recall, durable repository, singleton queue contract, and handler now exist and are covered by offline tests. The production entrypoint still does not register the handler or its dependencies.
+The production composition registers this handler with its model profiles, prompt bundle, durable repositories, queue publisher, optional memory recall, and outbound status transport. Offline tests cover those boundaries; protected live-provider execution remains a separate release check.
 
 ### 5.5 Execute
 
 Each `task.execute` handler re-checks chain/task state and current workspace capability, resolves a named thread and explicit workspace, creates a minimal child environment, applies a code-owned permission profile, runs with timeout/cancellation/output bounds, validates `ExecutionResult`, and persists a terminal task result or exact approval proposal.
 
-Execution agents cannot message the owner or consume their own approval. Their results return through synthesis. The Codex adapter, structured runtime, durable handler, and recovery scheduling exist; production worker registration remains uncomposed.
+Execution agents cannot message the owner or consume their own approval. Their results return through synthesis. The production composition registers the durable execution worker with bounded concurrency, cancellation, model routing, prompts, and the shared orchestration repository.
 
 ### 5.6 Synthesize
 
-The singleton `turn.synthesize` handler loads terminal task results, preserves truthful partial failures, requires confirmation for consequential operations, produces the final user-facing response, and materializes every outbound part before sending. The queue contract, repository, and handler exist; production worker registration remains uncomposed.
+The singleton `turn.synthesize` handler loads terminal task results, preserves truthful partial failures, requires confirmation for consequential operations, produces the final user-facing response, and materializes every outbound part before sending. The production composition registers this worker and the outbound sender against the same durable repository and queue.
 
 ### 5.7 Send
 
@@ -330,7 +330,7 @@ Extension points are explicit dependency-injection boundaries, not speculative p
 
 | Boundary | Intended extension |
 |---|---|
-| `AgentServiceBootstrap` | Final integration owner composes config, storage, DB, queue, Codex, memory, and Spectrum lifecycle |
+| `AgentServiceBootstrap` | `production-bootstrap.ts` supplies config, storage, DB, queue, Codex, memory, and Spectrum lifecycle adapters |
 | `AuthorizeAndIngest` | Deterministic allowlist/group policy followed by durable ingest |
 | `StructuredCodexRunner` | Real pinned Codex SDK runtime or deterministic test fake |
 | `OutboundTransport` | Native Spectrum space rehydration/send adapter or test fake |
@@ -357,4 +357,4 @@ The starter intentionally does not pre-build this distributed topology.
 
 Automated tests may verify deterministic module behavior with fakes and, when configured, a disposable PostgreSQL database. They do not establish that Railway provisioned a clean account, Photon delivered/replayed a real event, Codex authenticated/resumed a live thread, or Supermemory persisted/deleted a live memory.
 
-Release acceptance requires an integration entrypoint plus the protected E2E, chaos, rollback, restart, and clean-room documentation exercises in [TEST_PLAN.md](./TEST_PLAN.md). Until those are recorded, describe the provider paths as designed or locally simulated—not live-working.
+The executable production runtime is composed. Release acceptance still requires the protected E2E, chaos, rollback, restart, and clean-room documentation exercises in [TEST_PLAN.md](./maintainers/TEST_PLAN.md). Until those are recorded, describe the provider paths as designed or locally simulated—not live-working.

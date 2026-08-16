@@ -14,7 +14,7 @@
 
 **Why:** Railway can host and privately wire the database in the same project; one system can own transcript, identities, queues, approvals, idempotency, and audit data.
 
-**Rejected:** Convex as default. It is technically viable but requires a separate project/deployment flow, weakening one-click installation. See `CONVEX_VARIANT.md`.
+**Rejected:** Convex as default. It is technically viable but requires a separate project/deployment flow, weakening the guided single-project installation. See `CONVEX_VARIANT.md`.
 
 ## ADR-003 — Supermemory stores curated semantic memory only
 
@@ -34,7 +34,7 @@
 
 ## ADR-005 — ChatGPT login is deployment enrollment, not web OAuth
 
-**Decision:** the operator runs Codex device auth once in the private local/Railway environment; API-key mode is the automation alternative.
+**Decision:** the operator completes Codex device auth once through the private setup flow or Railway SSH recovery path; API-key mode is the automation alternative.
 
 **Why:** Codex SDK wraps the CLI and uses local credential/session state. The starter should represent this accurately.
 

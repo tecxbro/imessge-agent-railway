@@ -453,15 +453,15 @@ An independent security reviewer is strongly recommended. The primary implementa
 
 ---
 
-## Step 8 — Railway deployment, end-to-end recovery, documentation, and release
+## Release phase — Railway deployment, end-to-end recovery, documentation, and release
 
 ### Goal
 
 Make the project genuinely deployable from a clean account and prove it survives realistic failures.
 
-### Worktree
+### Current status
 
-Implemented directly on `main` for the hosting migration after all local checks pass.
+The executable production runtime is composed on `main`. Clean-account Railway deployment and protected live-provider evidence remain separate release checks.
 
 ### Files to create or change
 
@@ -470,8 +470,8 @@ Implemented directly on `main` for the hosting migration after all local checks 
 | `railway.json` | Application service build, migration, start, health, restart, overlap, and draining settings |
 | `src/http/readiness.ts` | Full component readiness |
 | `src/index.ts` | Final boot order and graceful shutdown |
-| `README.md` | Zero-to-first-message guide and Deploy to Railway button |
-| `ARCHITECTURE.md` | Final diagrams and extension points |
+| `README.md` | Zero-to-first-message Railway deployment guide |
+| `docs/ARCHITECTURE.md` | Final diagrams and extension points |
 | `AGENTS.md` | Final coding rules |
 | `docs/*` | PRD, model, memory, security, testing, business, docs index |
 | `test/e2e/railway-smoke.md` or script | Clean-deploy checklist |
@@ -482,9 +482,9 @@ Implemented directly on `main` for the hosting migration after all local checks 
 1. Create one Railway application service, one PostgreSQL 18 service, and one volume.
 2. Set `CODEX_HOME` and workspace root under the volume mount.
 3. Use `DATABASE_URL=${{Postgres.DATABASE_URL}}`; never ask the user to copy connection strings manually.
-4. Set Photon credentials, Supermemory key, owner handles, and optional auth/model configuration as Railway service variables.
-5. Start in live-but-not-ready state until Codex enrollment is complete.
-6. Document `railway ssh`, `npm run codex:login`, and `npm run codex:status`.
+4. Set the owner phone, encryption key, and optional Supermemory/auth/model configuration as Railway service variables.
+5. Start in live-but-not-ready state, then connect Photon and ChatGPT from the operator dashboard.
+6. Keep `railway ssh`, `npm run codex:login`, and `npm run codex:status` documented as an operator fallback.
 7. Validate volume permissions and credential storage mode at startup.
 8. Run migrations as a pre-deploy command or release step.
 9. Execute Railway configuration unit tests and official JSON schema validation in CI.

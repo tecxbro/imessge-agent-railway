@@ -15,11 +15,11 @@ summary: Implement or review owner-scoped Supermemory recall, curation, deletion
 
 ## Read first
 
-- `DATA_MODEL.md`, memory tables
-- `IMPLEMENTATION_PLAN.md`, Step 6
-- `SECURITY_AND_PRIVACY.md`
+- `docs/maintainers/DATA_MODEL.md`, memory tables
+- `docs/maintainers/IMPLEMENTATION_PLAN.md`, Step 6
+- `docs/SECURITY_AND_PRIVACY.md`
 - `prompts/memory-curator.system.md`
-- `DOCS_INDEX.md`, Supermemory section
+- `docs/maintainers/PROVIDER_REFERENCES.md`, Supermemory section
 - Current Supermemory `llms.txt`
 
 ## Rules

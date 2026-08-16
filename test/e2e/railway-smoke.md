@@ -15,6 +15,10 @@ Use this file as an evidence record, not as a statement that a check passed. Mar
 | Railway CLI version/workspace | |
 | Railway deploy ID | |
 
+## Runtime status and evidence boundary
+
+The executable production runtime is composed. `npm start` executes `dist/server.js`, built from `src/server.ts`, which loads `createProductionRuntime()` and starts the PostgreSQL, queue, Codex, optional memory, worker, reconciliation, authorization, and Spectrum lifecycle. Clean-account Railway deployment and protected live-provider evidence remain separate release checks and must stay blank, `BLOCKED`, or `NOT RUN` until exercised.
+
 ## A. Offline preflight
 
 Run from a clean checkout:
@@ -28,6 +32,7 @@ npm run test:security
 npm run test:integration
 npm run test:chaos
 npm run build
+npm run docs:check
 npm run railway:validate
 git diff --check
 ```
@@ -60,7 +65,7 @@ If the official schema cannot be fetched, mark schema validation `BLOCKED`; unit
 
 ## B. Clean local install
 
-Follow [`../../DEPLOYMENT_AND_AUTH.md`](../../DEPLOYMENT_AND_AUTH.md), including a dedicated PostgreSQL database, absolute non-overlapping storage paths, and one explicit Codex auth mode.
+Follow [`../../docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md), including a dedicated PostgreSQL database, absolute non-overlapping storage paths, and one explicit Codex auth mode.
 
 ```bash
 npm run db:migrate
@@ -77,13 +82,15 @@ curl --silent --show-error http://127.0.0.1:10000/readyz
 | `CODEX_HOME` | absolute directory, mode `0700` | | |
 | Workspace root | separate absolute directory, mode `0700` | | |
 | Codex auth | chosen mode reported; no secret printed | | |
-| Operator page | HTTP 200; identifies setup/readiness status truthfully | | |
+| Operator page | HTTP 200; identifies setup/readiness status and claims readiness only after critical checks pass | | |
 | `/healthz` | HTTP 200 | | |
 | `/readyz` | HTTP 200 only after every critical component is ready | | |
 | Authorized first message | one terminal response | | |
 | Unknown sender | zero Codex child processes | | |
 
 ## C. Clean Railway deployment
+
+`/readyz` may return HTTP 503 during incomplete setup or a dependency outage. Record the returned redacted component state; do not pre-mark ready-state or message checks based on code composition alone.
 
 Create a Railway project from the exact commit above.
 
@@ -95,7 +102,7 @@ Create a Railway project from the exact commit above.
 | Codex path | `CODEX_HOME=/var/data/codex` | | |
 | Workspace path | `AGENT_WORKSPACE_ROOT=/var/data/workspaces` | | |
 | Database wiring | `DATABASE_URL` dynamic reference; no manual URL | | |
-| Required variables | preserved deployment ID/encryption key, Photon credentials, owner handles; no literal secrets in source | | |
+| Required variables | owner phone, preserved deployment ID/encryption key, storage paths; no literal secrets in source | | |
 | Optional Supermemory | `SUPERMEMORY_API_KEY` absent disables memory; migrated prefix is preserved | | |
 | GitHub trigger | `main`, Wait for CI enabled before autodeploy | | |
 | Build | `npm ci --include=dev && npm run build` exits 0 | | |
@@ -103,13 +110,15 @@ Create a Railway project from the exact commit above.
 | Start | `npm start` binds Railway `PORT` | | |
 | Operator page | generated URL explains that it is not the iMessage chat link and reports truthful readiness | | |
 | Liveness | external `/healthz` HTTP 200 | | |
-| Initial readiness | 503 only for expected missing auth/dependency | | |
+| Initial readiness | 503 only for expected Photon/ChatGPT setup or dependency state | | |
+
+Do not record the Railway deployment as cleanly functional until this exact production entrypoint reaches `/readyz` 200 and the protected first-message checks pass.
 
 ## D. Codex enrollment and restart persistence
 
 ### ChatGPT mode
 
-In Railway SSH:
+Open the Railway service URL, authenticate Photon, then choose **Connect ChatGPT** and complete the device-code flow. As an operator fallback, use Railway SSH:
 
 ```bash
 railway ssh
@@ -152,7 +161,7 @@ SPECTRUM_LIVE_TEST=true npm test -- test/live/spectrum-dm.test.ts
 
 The Spectrum test also requires every documented `SPECTRUM_LIVE_*` value in a protected environment. Supermemory requires a separate add/search/delete item in a test owner container; no protected Supermemory live script is currently checked in, so mark it `BLOCKED` or `NOT RUN` rather than substituting fake-provider results.
 
-The dedicated memory-provider outage/Supermemory-timeout resilience exercise was intentionally skipped by user direction for this Step 8 run. Preserve it as `NOT RUN`; incidental fake-provider coverage in a broad offline suite is not accepted as outage validation, and the expected invariant below remains policy unless a later authorized run supplies evidence.
+The dedicated memory-provider outage/Supermemory-timeout resilience exercise is not recorded in the current release evidence. Preserve it as `NOT RUN`; incidental fake-provider coverage in a broad offline suite is not accepted as outage validation, and the expected invariant below remains policy unless a later authorized run supplies evidence.
 
 | Provider | Status | Exact test/evidence | Live claim allowed? |
 |---|---|---|---|
@@ -236,4 +245,4 @@ After Railway readiness passes:
 
 **Decision:** `GO` / `NO-GO`
 
-A `GO` requires every required gate to pass. Any skipped required database test, missing failure-stage evidence, or unsupported live-provider claim is `NO-GO`.
+A `GO` requires every required gate to pass. Any composition mismatch, skipped required database test, missing failure-stage evidence, or unsupported live-provider claim is `NO-GO`.

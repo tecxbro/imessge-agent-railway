@@ -55,7 +55,13 @@ const databaseUrlSchema = requiredText("DATABASE_URL")
     "DATABASE_URL must use the postgres or postgresql protocol",
   );
 
-const ownerHandlesSchema = requiredText("AGENT_OWNER_HANDLES").transform(
+const e164PhoneNumberSchema = (label: string) =>
+  z
+    .string({ error: `${label} must be an E.164 phone number` })
+    .trim()
+    .regex(/^\+[1-9]\d{7,14}$/u, `${label} must be an E.164 phone number`);
+
+const ownerHandlesSchema = z.string().trim().min(1).transform(
   (value, context): string[] => {
     const handles = value
       .split(",")
@@ -156,6 +162,7 @@ const encryptionKeySchema = requiredText("APP_ENCRYPTION_KEY").refine((value) =>
 
 const rawEnvironmentSchema = z
   .object({
+    // Required infrastructure and process values
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     PORT: integerFromEnvironment("PORT", 1, 65_535, 10_000),
     PATH: requiredText("PATH"),
@@ -164,15 +171,26 @@ const rawEnvironmentSchema = z
     LC_ALL: optionalText(z.string().trim().min(1)),
     LC_CTYPE: optionalText(z.string().trim().min(1)),
 
-    SPECTRUM_PROJECT_ID: requiredText("SPECTRUM_PROJECT_ID"),
-    SPECTRUM_PROJECT_SECRET: requiredText("SPECTRUM_PROJECT_SECRET"),
+    SPECTRUM_PROJECT_ID: optionalText(
+      z.string().trim().min(1, "SPECTRUM_PROJECT_ID must not be empty"),
+    ),
+    SPECTRUM_PROJECT_SECRET: optionalText(
+      z.string().trim().min(1, "SPECTRUM_PROJECT_SECRET must not be empty"),
+    ),
     DATABASE_URL: databaseUrlSchema,
-    AGENT_OWNER_HANDLES: ownerHandlesSchema,
+    OWNER_PHONE_NUMBER: optionalText(
+      e164PhoneNumberSchema("OWNER_PHONE_NUMBER"),
+    ),
+    AGENT_OWNER_HANDLES: z.preprocess(
+      emptyToUndefined,
+      ownerHandlesSchema.optional(),
+    ),
     DEPLOYMENT_ID: requiredText("DEPLOYMENT_ID").pipe(
       z.uuid("DEPLOYMENT_ID must be a UUID"),
     ),
     APP_ENCRYPTION_KEY: encryptionKeySchema,
 
+    // Codex authentication and isolated storage
     CODEX_HOME: protectedPathSchema("CODEX_HOME"),
     AGENT_WORKSPACE_ROOT: protectedPathSchema("AGENT_WORKSPACE_ROOT"),
     CODEX_AUTH_MODE: z.enum(["chatgpt", "api_key"]).default("chatgpt"),
@@ -180,6 +198,7 @@ const rawEnvironmentSchema = z
       z.string().trim().min(1, "OPENAI_API_KEY must not be empty"),
     ),
 
+    // Optional semantic memory
     SUPERMEMORY_API_KEY: optionalText(
       z.string().trim().min(1, "SUPERMEMORY_API_KEY must not be empty"),
     ),
@@ -195,6 +214,7 @@ const rawEnvironmentSchema = z
           .default("imessage-agent"),
       ),
 
+    // Model profiles
     MODEL_FAST: modelIdentifierSchema.default("gpt-5.6-luna"),
     MODEL_FAST_EFFORT: reasoningEffortSchema.default("medium"),
     MODEL_MAIN: modelIdentifierSchema.default("gpt-5.6-luna"),
@@ -210,6 +230,7 @@ const rawEnvironmentSchema = z
       false,
     ),
 
+    // Operational limits, retention, and logging
     INBOUND_DEBOUNCE_MS: integerFromEnvironment(
       "INBOUND_DEBOUNCE_MS",
       3_000,
@@ -269,6 +290,36 @@ const rawEnvironmentSchema = z
     RAILWAY_VOLUME_MOUNT_PATH: railwayVolumeMountPathSchema,
   })
   .superRefine((environment, context) => {
+    // Cross-field safety checks prevent individually valid values from creating
+    // an unsafe combined authentication, concurrency, or storage layout.
+    if (
+      (environment.SPECTRUM_PROJECT_ID === undefined) !==
+      (environment.SPECTRUM_PROJECT_SECRET === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: [
+          environment.SPECTRUM_PROJECT_ID === undefined
+            ? "SPECTRUM_PROJECT_ID"
+            : "SPECTRUM_PROJECT_SECRET",
+        ],
+        message:
+          "SPECTRUM_PROJECT_ID and SPECTRUM_PROJECT_SECRET must either both be set or both be omitted until Photon setup is complete",
+      });
+    }
+
+    if (
+      environment.OWNER_PHONE_NUMBER === undefined &&
+      environment.AGENT_OWNER_HANDLES === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["OWNER_PHONE_NUMBER"],
+        message:
+          "OWNER_PHONE_NUMBER is required unless AGENT_OWNER_HANDLES is set by an existing deployment",
+      });
+    }
+
     if (
       environment.CODEX_AUTH_MODE === "api_key" &&
       environment.OPENAI_API_KEY === undefined
@@ -315,7 +366,6 @@ const rawEnvironmentSchema = z
           "AGENT_WORKSPACE_ROOT and CODEX_HOME must be separate, non-overlapping paths",
       });
     }
-
     const railwayRuntime =
       environment.RAILWAY_SERVICE_ID !== undefined ||
       environment.RAILWAY_DEPLOYMENT_ID !== undefined ||
@@ -349,6 +399,18 @@ const rawEnvironmentSchema = z
         }
       }
     }
+  })
+  .transform((environment) => {
+    const ownerPhoneNumber = environment.OWNER_PHONE_NUMBER;
+
+    return {
+      ...environment,
+      OWNER_PHONE_NUMBER: ownerPhoneNumber,
+      AGENT_OWNER_HANDLES:
+        ownerPhoneNumber === undefined
+          ? environment.AGENT_OWNER_HANDLES!
+          : [ownerPhoneNumber],
+    };
   });
 
 export type Environment = z.infer<typeof rawEnvironmentSchema>;

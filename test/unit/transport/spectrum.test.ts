@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSpectrumCloudOptions,
+  resolveSpectrumCloudCredentials,
   spectrumCredentialsFromEnvironment,
 } from "../../../src/transport/spectrum.js";
 
@@ -44,6 +45,29 @@ describe("Spectrum Cloud bootstrap", () => {
     ).toEqual({
       projectId: "project-id",
       projectSecret: "project-secret",
+    });
+  });
+
+  it("prefers persisted Photon credentials and preserves the legacy fallback", () => {
+    const legacy = {
+      SPECTRUM_PROJECT_ID: "legacy-project",
+      SPECTRUM_PROJECT_SECRET: "legacy-secret",
+    };
+    expect(
+      resolveSpectrumCloudCredentials(
+        {
+          photonProjectId: "persisted-project",
+          spectrumProjectSecret: "persisted-secret",
+        },
+        legacy,
+      ),
+    ).toEqual({
+      projectId: "persisted-project",
+      projectSecret: "persisted-secret",
+    });
+    expect(resolveSpectrumCloudCredentials(undefined, legacy)).toEqual({
+      projectId: "legacy-project",
+      projectSecret: "legacy-secret",
     });
   });
 

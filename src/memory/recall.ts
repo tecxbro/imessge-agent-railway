@@ -122,6 +122,8 @@ export async function recallMemoryContext(input: {
   maxCharacters?: number;
   signal?: AbortSignal;
 }): Promise<MemoryRecallResult> {
+  // Recall is owner-scoped, deletion-aware, bounded, and explicitly untrusted;
+  // provider or receipt outages degrade context instead of operational state.
   const parsed = recallInputSchema.parse({
     deploymentId: input.deploymentId,
     ownerId: input.ownerId,

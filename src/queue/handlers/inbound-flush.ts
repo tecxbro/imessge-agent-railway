@@ -11,6 +11,8 @@ export interface InboundFlushDependencies {
 
 export function createInboundFlushHandler(dependencies: InboundFlushDependencies) {
   return async (payload: InboundFlushPayload): Promise<void> => {
+    // The repository atomically drains carried/current messages into one
+    // versioned chain before the identifier-only planning job is published.
     const flushed = await dependencies.chains.flushInboundMessages(
       payload.spaceId,
       dependencies.now?.() ?? new Date(),

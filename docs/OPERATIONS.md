@@ -1,6 +1,6 @@
 # Operations Runbook
 
-This runbook covers day-two operation of the private single-instance Railway deployment. Deployment and enrollment instructions live in [`../DEPLOYMENT_AND_AUTH.md`](../DEPLOYMENT_AND_AUTH.md). The release smoke record lives in [`../test/e2e/railway-smoke.md`](../test/e2e/railway-smoke.md).
+This runbook covers day-two operation of the private single-instance Railway deployment. Initial deployment and enrollment instructions live in [Deployment](./DEPLOYMENT.md). The release smoke record lives in [`../test/e2e/railway-smoke.md`](../test/e2e/railway-smoke.md).
 
 ## Current release gate
 
@@ -99,7 +99,7 @@ Symptoms: `/healthz` 200; `/readyz` 503 with `DATABASE_UNAVAILABLE`; downstream 
 
 Symptoms: memory recall is explicitly unavailable/degraded; core readiness can remain healthy.
 
-This is the required operating policy. The dedicated Step 8 memory-provider outage exercise was intentionally skipped by user direction. Incidental fake-provider coverage in a broad offline suite is not accepted as outage validation.
+This is the required operating policy. The dedicated memory-provider outage exercise has not been recorded as protected release evidence. Incidental fake-provider coverage in a broad offline suite is not accepted as outage validation.
 
 1. Do not stop operational messaging solely for memory unavailability.
 2. Verify planning used an empty memory context rather than stale cross-owner data.
@@ -160,4 +160,5 @@ Escalate and keep execution paused when:
 - a stale/canceled chain sends;
 - an outbound retry changes client GUID;
 - credentials appear in logs or health responses;
-- the old application/schema compatibility is unknown;
+- the old application/schema compatibility is unknown; or
+- executable composition does not match the reviewed `src/server.ts` and `production-bootstrap.ts` release.

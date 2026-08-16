@@ -2,12 +2,17 @@ import { type AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ChatGptSetupController } from "../../src/agent/codex-app-server-auth.js";
 import {
   startAgentService,
   type AgentServiceBootstrap,
   type RunningAgentService,
 } from "../../src/index.js";
 import { runSpectrumMessageLoop } from "../../src/transport/message-loop.js";
+import type {
+  PhotonSetupController,
+  PhotonSetupStatus,
+} from "../../src/transport/photon-setup.js";
 
 const runningServices: RunningAgentService[] = [];
 
@@ -223,7 +228,176 @@ describe("composed service lifecycle recovery", () => {
       },
     });
     expect(readiness.body.actions).toEqual([
-      expect.stringContaining("npm run codex:login again"),
+      expect.stringContaining("reconnect ChatGPT"),
     ]);
+  });
+
+  it("keeps intake off until Photon and ChatGPT are both connected, then unlocks exactly once", async () => {
+    let photonStatus: PhotonSetupStatus = { state: "not_connected" };
+    let photonListener: (() => void | Promise<void>) | undefined;
+    const photonSetup = {
+      status: () => photonStatus,
+      start: async () => photonStatus,
+      onConnected: (listener) => {
+        photonListener = () => listener({
+          photonDeviceBearerToken: "fixture-token",
+          photonProjectId: "fixture-project",
+          spectrumProjectSecret: "fixture-secret",
+          ownerPhoneNumber: "+16285550100",
+          assignedIMessageNumber: "+16285550123",
+        });
+        return () => {
+          photonListener = undefined;
+        };
+      },
+    } satisfies PhotonSetupController;
+
+    let chatGptConnected = false;
+    let chatGptListener: (() => void | Promise<void>) | undefined;
+    const chatgptSetup = {
+      initialize: async () => ({ state: "not_connected" as const }),
+      status: () =>
+        chatGptConnected
+          ? ({ state: "connected" } as const)
+          : ({ state: "not_connected" } as const),
+      start: async () => ({ state: "not_connected" as const }),
+      onConnected: (listener) => {
+        chatGptListener = listener;
+        return () => {
+          chatGptListener = undefined;
+        };
+      },
+      close: async () => undefined,
+    } satisfies ChatGptSetupController;
+
+    const startSpectrum = vi.fn(async ({ readiness }) => {
+      readiness.markConnected();
+    });
+    const checkCodex = vi.fn(async () =>
+      chatGptConnected
+        ? ({ auth: "ok", capabilities: "ok" } as const)
+        : ({
+            auth: "missing",
+            capabilities: "unknown",
+            authCode: "CODEX_AUTH_MISSING",
+          } as const),
+    );
+    const service = await startAgentService({
+      port: 0,
+      host: "127.0.0.1",
+      installSignalHandlers: false,
+      photonSetup,
+      chatgptSetup,
+      bootstrap: {
+        prepareConfiguration: async () => undefined,
+        prepareStorage: async () => undefined,
+        connectDatabase: async () => undefined,
+        applyMigrations: async () => undefined,
+        startQueue: async () => undefined,
+        checkCodex,
+        configureSupermemory: async () => "disabled",
+        startSpectrum,
+      },
+    });
+    runningServices.push(service);
+
+    expect(startSpectrum).not.toHaveBeenCalled();
+    await expect(fetchReadiness(service)).resolves.toMatchObject({
+      status: 503,
+      body: { ready: false },
+    });
+
+    photonStatus = {
+      state: "connected",
+      assignedPhoneNumber: "+16285550123",
+    };
+    await photonListener?.();
+    expect(startSpectrum).not.toHaveBeenCalled();
+
+    chatGptConnected = true;
+    await chatGptListener?.();
+    expect(checkCodex).toHaveBeenCalledTimes(2);
+    expect(startSpectrum).toHaveBeenCalledOnce();
+    await expect(fetchReadiness(service)).resolves.toMatchObject({
+      status: 200,
+      body: {
+        ready: true,
+        components: {
+          codexAuth: { state: "ok" },
+          codexCapabilities: { state: "ok" },
+          spectrum: { state: "ok" },
+        },
+      },
+    });
+
+    await chatGptListener?.();
+    await photonListener?.();
+    expect(startSpectrum).toHaveBeenCalledOnce();
+  });
+
+  it("preserves ChatGPT completion that arrives before optional startup stages finish", async () => {
+    let connected = false;
+    let completion: (() => void | Promise<void>) | undefined;
+    const chatgptSetup = {
+      initialize: async () => ({ state: "not_connected" as const }),
+      status: () =>
+        connected
+          ? ({ state: "connected" } as const)
+          : ({ state: "not_connected" } as const),
+      start: async () => ({ state: "not_connected" as const }),
+      onConnected: (listener) => {
+        completion = listener;
+        return () => {
+          completion = undefined;
+        };
+      },
+      close: async () => undefined,
+    } satisfies ChatGptSetupController;
+    const photonSetup = {
+      status: () => ({ state: "connected" as const }),
+      start: async () => ({ state: "connected" as const }),
+    } satisfies PhotonSetupController;
+    const checkCodex = vi.fn(async () =>
+      connected
+        ? ({ auth: "ok", capabilities: "ok" } as const)
+        : ({
+            auth: "missing",
+            capabilities: "unknown",
+            authCode: "CODEX_AUTH_MISSING",
+          } as const),
+    );
+    const startSpectrum = vi.fn(async ({ readiness }) => {
+      readiness.markConnected();
+    });
+
+    const service = await startAgentService({
+      port: 0,
+      host: "127.0.0.1",
+      installSignalHandlers: false,
+      photonSetup,
+      chatgptSetup,
+      bootstrap: {
+        prepareConfiguration: async () => undefined,
+        prepareStorage: async () => undefined,
+        connectDatabase: async () => undefined,
+        applyMigrations: async () => undefined,
+        startQueue: async () => undefined,
+        checkCodex,
+        configureSupermemory: async () => {
+          connected = true;
+          await completion?.();
+          return "disabled";
+        },
+        startSpectrum,
+      },
+    });
+    runningServices.push(service);
+
+    expect(checkCodex).toHaveBeenCalledTimes(2);
+    expect(startSpectrum).toHaveBeenCalledOnce();
+    await expect(fetchReadiness(service)).resolves.toMatchObject({
+      status: 200,
+      body: { ready: true },
+    });
   });
 });

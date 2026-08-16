@@ -55,6 +55,8 @@ export class OutboundRepository {
   }
 
   public async materializeBatch(input: MaterializeOutboundInput): Promise<string> {
+    // Per-space advisory locks and chain row locks keep materialization and the
+    // send cursor monotonic across concurrent workers and process restarts.
     if (input.encryptedParts.length === 0) {
       throw new Error(
         "Cannot materialize an empty outbound batch. Synthesis must produce at least one encrypted bubble.",

@@ -168,6 +168,8 @@ export function createTaskExecuteHandler(dependencies: TaskExecuteDependencies) 
     payload: TaskExecutePayload,
     signal: AbortSignal = new AbortController().signal,
   ): Promise<void> => {
+    // Claim and version-check the durable task before Codex starts; completion
+    // is committed through the same authoritative expected-chain contract.
     const context = await dependencies.repository.claimTask(payload);
     if (context === null) {
       return;

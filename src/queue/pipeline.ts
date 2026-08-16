@@ -48,8 +48,12 @@ export class DurablePipeline {
   public async ingestAndSchedule(
     input: AcceptedInboundMessage,
   ): Promise<IngestResult> {
+    // Commit accepted content before touching pg-boss. A queue outage may delay
+    // work, but it cannot make an authorized inbound message disappear.
     const result = await this.dependencies.inbound.ingestAcceptedMessage(input);
     if (result.inserted) {
+      // Supersession interrupts stale work; its already accepted messages stay
+      // durable so the repository can carry them into the replacement chain.
       const superseded = await this.dependencies.chains.supersedeActiveChain(
         input.spaceId,
         result.messageId,
@@ -75,6 +79,8 @@ export class DurablePipeline {
   }
 
   public async reconcile(limit = 100): Promise<ReconciliationResult> {
+    // Reconciliation recreates identifier-only jobs from authoritative rows
+    // after a crash or a database-commit/queue-publish split failure.
     const spaceIds = await this.dependencies.inbound.findSpacesWithUndrainedInbound(
       limit,
     );

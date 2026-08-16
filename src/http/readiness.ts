@@ -78,9 +78,9 @@ const CRITICAL_COMPONENTS: ReadonlySet<ReadinessComponent> = new Set([
 
 const SAFE_ACTIONS: Readonly<Partial<Record<string, string>>> = {
   CODEX_AUTH_MISSING:
-    "Run npm run codex:login in the private service shell, verify with npm run codex:status, then restart the service.",
+    "Open the agent dashboard and connect ChatGPT. Agent intake stays off until sign-in and the Codex readiness check finish.",
   CODEX_AUTH_EXPIRED:
-    "Run npm run codex:login again in the private service shell, verify with npm run codex:status, then restart the service.",
+    "Open the agent dashboard and reconnect ChatGPT. Agent intake stays off until the Codex readiness check finishes.",
   CODEX_CAPABILITY_FAILED:
     "Run the configured Codex model and effort capability probe, correct unsupported profiles, then restart.",
   DATABASE_UNAVAILABLE:

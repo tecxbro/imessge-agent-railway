@@ -16,10 +16,10 @@ summary: Implement or review Photon Spectrum Cloud gRPC receive/send behavior, s
 
 ## Read first
 
-- `ARCHITECTURE.md`
-- `IMPLEMENTATION_PLAN.md`, Step 2
-- `REPOSITORY_BLUEPRINT.md`
-- `DOCS_INDEX.md`, Photon Spectrum section
+- `docs/ARCHITECTURE.md`
+- `docs/maintainers/IMPLEMENTATION_PLAN.md`, Step 2
+- `docs/maintainers/REPOSITORY_BLUEPRINT.md`
+- `docs/maintainers/PROVIDER_REFERENCES.md`, Photon Spectrum section
 - Current Spectrum `llms.txt` and official routing/recovery source docs
 
 ## Rules

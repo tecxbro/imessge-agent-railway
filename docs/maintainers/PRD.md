@@ -18,7 +18,7 @@ The agent combines:
 - Configurable GPT-5.6 Luna, Terra, and Sol model profiles.
 - PostgreSQL for raw conversation state, job coordination, auditability, approvals, and restart recovery.
 - Supermemory for durable semantic facts and user profile recall.
-- Railway for one-click infrastructure provisioning and a private post-deploy ChatGPT device-login step.
+- Railway for guided project deployment and private dashboard-managed provider enrollment.
 
 The first release is deliberately **single-owner and private**. A public multi-tenant agent would require a different authentication, credential-isolation, billing, abuse-prevention, and worker architecture.
 
@@ -82,14 +82,13 @@ A team that wants to fork the starter for a customer or employee use case and ad
 
 ### Journey A: first deployment
 
-1. User connects the repository to a Railway application service.
-2. User creates one Railway application service, one PostgreSQL 18 service, and one persistent volume.
-3. User supplies Photon credentials, Supermemory key, and authorized owner handles.
-4. Service starts but `/readyz` reports `codex_auth_missing`.
-5. User opens Railway SSH and runs `npm run codex:login`.
-6. Codex displays a device code; user completes ChatGPT sign-in in a browser.
-7. User runs `npm run codex:status` and restarts the service.
-8. `/readyz` becomes healthy.
+1. User creates one Railway application service, one PostgreSQL 18 service, and one persistent volume.
+2. User connects this repository and configures the required owner, storage, database, encryption, and authentication variables.
+3. The service starts live but not ready and exposes the operator dashboard.
+4. User completes Photon setup from the dashboard.
+5. In ChatGPT mode, user completes the dashboard-managed Codex device-login flow; API-key mode uses the configured service secret.
+6. The runtime rechecks authentication and capabilities without accepting messages prematurely.
+7. `/readyz` becomes healthy only after every critical component reports ready.
 9. User sends `hello` from an authorized iMessage address and gets an onboarding reply.
 
 **Success condition:** a fresh deploy can reach a useful first response without editing source code.
@@ -306,7 +305,7 @@ These are launch targets, not promises about third-party model or transport late
 - Runtime validation with Zod or equivalent at every model and queue boundary.
 - No custom wrapper that hides Spectrum’s native `Space` and `Message` concepts.
 - No empty “future” folders.
-- Every new provider integration includes primary docs in `DOCS_INDEX.md`.
+- Every new provider integration includes primary docs in `PROVIDER_REFERENCES.md`.
 - Prompts remain separate Markdown files with version metadata.
 
 ## 11. Scope
@@ -321,7 +320,7 @@ These are launch targets, not promises about third-party model or transport late
 - Model profile routing.
 - PostgreSQL state, pg-boss queue, restart recovery.
 - Supermemory recall/write/delete.
-- Local and Railway deployment.
+- Local and guided Railway deployment.
 - ChatGPT device auth or API-key auth.
 - Commands, cancellation, approval gates, health, logging, tests, and complete docs.
 

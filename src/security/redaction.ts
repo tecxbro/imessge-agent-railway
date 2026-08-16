@@ -9,6 +9,7 @@ const sensitiveKeys = new Set([
   "authjson",
   "databaseurl",
   "openaiapikey",
+  "photondevicebearertoken",
   "spectrumprojectsecret",
   "supermemoryapikey",
   "appencryptionkey",

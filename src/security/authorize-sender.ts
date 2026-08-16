@@ -1,3 +1,10 @@
+/**
+ * Deterministic sender authorization gates.
+ *
+ * The transport gate authorizes before persistence and queueing. The queued
+ * work gate reauthorizes immediately before Codex or another child process
+ * starts so revocation and rate-limit changes cannot be bypassed by old jobs.
+ */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
