@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   deploymentIdFromRailwayServiceId,
   EnvironmentValidationError,
+  loadDatabaseMigrationEnvironment,
   loadEnvironment,
   modelProfilesFromEnvironment,
 } from "../../src/config/env.js";
@@ -26,6 +27,33 @@ function validEnvironment(
     ...overrides,
   };
 }
+
+describe("loadDatabaseMigrationEnvironment", () => {
+  it("requires only the database URL for the pre-deploy migration", () => {
+    expect(
+      loadDatabaseMigrationEnvironment({
+        DATABASE_URL: "postgresql://agent:password@localhost:5432/agent",
+      }),
+    ).toEqual({
+      DATABASE_URL: "postgresql://agent:password@localhost:5432/agent",
+    });
+  });
+
+  it("reports a missing database URL without unrelated application variables", () => {
+    expect(() => loadDatabaseMigrationEnvironment({})).toThrow(
+      /DATABASE_URL is required/u,
+    );
+
+    try {
+      loadDatabaseMigrationEnvironment({});
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnvironmentValidationError);
+      expect((error as Error).message).not.toMatch(
+        /APP_ENCRYPTION_KEY|CODEX_HOME|AGENT_WORKSPACE_ROOT/u,
+      );
+    }
+  });
+});
 
 describe("loadEnvironment", () => {
   it("normalizes documented defaults, handles, paths, and model profiles", () => {

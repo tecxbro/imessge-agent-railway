@@ -55,6 +55,10 @@ const databaseUrlSchema = requiredText("DATABASE_URL")
     "DATABASE_URL must use the postgres or postgresql protocol",
   );
 
+const databaseMigrationEnvironmentSchema = z.object({
+  DATABASE_URL: databaseUrlSchema,
+});
+
 const e164PhoneNumberSchema = (label: string) =>
   z
     .string({ error: `${label} must be an E.164 phone number` })
@@ -414,6 +418,9 @@ const rawEnvironmentSchema = z
   });
 
 export type Environment = z.infer<typeof rawEnvironmentSchema>;
+export type DatabaseMigrationEnvironment = z.infer<
+  typeof databaseMigrationEnvironmentSchema
+>;
 
 export class EnvironmentValidationError extends Error {
   public readonly issues: readonly z.core.$ZodIssue[];
@@ -500,6 +507,24 @@ function withRailwayDeploymentId(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     };
   }
   return source;
+}
+
+export function loadDatabaseMigrationEnvironment(
+  source?: NodeJS.ProcessEnv,
+): DatabaseMigrationEnvironment {
+  if (source === undefined) {
+    loadLocalEnvironmentFile();
+  }
+
+  const result = databaseMigrationEnvironmentSchema.safeParse(
+    source ?? process.env,
+  );
+
+  if (!result.success) {
+    throw new EnvironmentValidationError(result.error.issues);
+  }
+
+  return result.data;
 }
 
 export function loadEnvironment(source?: NodeJS.ProcessEnv): Environment {

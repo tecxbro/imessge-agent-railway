@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
-import { loadEnvironment } from "../config/env.js";
+import { loadDatabaseMigrationEnvironment } from "../config/env.js";
 import { createDatabaseClient, type DatabaseClient } from "./client.js";
 
 export async function runDatabaseMigrations(
@@ -13,7 +13,7 @@ export async function runDatabaseMigrations(
 }
 
 async function main(): Promise<void> {
-  const environment = loadEnvironment();
+  const environment = loadDatabaseMigrationEnvironment();
   const client = createDatabaseClient({ connectionString: environment.DATABASE_URL });
 
   try {
