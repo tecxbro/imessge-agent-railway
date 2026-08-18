@@ -3,6 +3,10 @@ import {
   type CodexRuntimeErrorCode,
 } from "../../agent/codex-client.js";
 import type { ExecutionRuntime } from "../../agent/execution-runtime.js";
+import {
+  asCodexModelProfile,
+  type ModelSelection,
+} from "../../agent/model-selection.js";
 import type { PromptSection } from "../../agent/prompt-builder.js";
 import {
   executionResultSchema,
@@ -10,7 +14,6 @@ import {
   type ExecutionResult,
   type ExecutionTask,
 } from "../../agent/schemas.js";
-import type { ModelProfiles } from "../../config/model-profiles.js";
 import type { PromptBundle } from "../../config/prompt-bundle.js";
 import type { PermissionProfileName } from "../../security/permissions.js";
 import type { QueuePublisher } from "../publisher.js";
@@ -19,6 +22,7 @@ import type { TaskExecutePayload } from "../payloads.js";
 export interface TaskExecutionContext {
   ownerId: string;
   task: ExecutionTask;
+  modelSelection: ModelSelection;
   /** Re-resolved from the current code-owned workspace capability at claim time. */
   maximumPermissionProfile: PermissionProfileName;
   workspaceRoot: string;
@@ -62,7 +66,6 @@ export interface TaskExecuteDependencies {
     QueuePublisher,
     "enqueueTaskExecute" | "enqueueTurnSynthesize"
   >;
-  modelProfiles: ModelProfiles;
   promptBundle: PromptBundle;
   maximumRuntimeMs?: number;
 }
@@ -182,7 +185,7 @@ export function createTaskExecuteHandler(dependencies: TaskExecuteDependencies) 
         ownerId: context.ownerId,
         task,
         maximumPermissionProfile: context.maximumPermissionProfile,
-        modelProfile: dependencies.modelProfiles[task.modelProfile],
+        modelProfile: asCodexModelProfile(context.modelSelection),
         workspaceRoot: context.workspaceRoot,
         policySections: executionPolicySections(
           context,

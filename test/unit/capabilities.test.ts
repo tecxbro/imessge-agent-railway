@@ -4,11 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { DEFAULT_MODEL_SELECTION } from "../../src/agent/model-selection.js";
 import {
   probeCodexCapabilities,
   type CapabilityPairRunner,
 } from "../../src/config/capabilities.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
 
 const temporaryDirectories: string[] = [];
 const currentUidOption =
@@ -39,16 +39,13 @@ describe("Codex startup capability report", () => {
         return { supported: true };
       },
     };
-
     const report = await probeCodexCapabilities({
       codexHome,
       authMode: "chatgpt",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: false,
+      selection: DEFAULT_MODEL_SELECTION,
       runner,
       ...currentUidOption,
     });
-
     expect(report.ready).toBe(false);
     expect(report.components).toMatchObject({
       disk: "ok",
@@ -61,36 +58,35 @@ describe("Codex startup capability report", () => {
 
   it("requires private auth-file permissions in ChatGPT mode", async () => {
     const codexHome = await temporaryCodexHome();
-    const authPath = join(codexHome, "auth.json");
-    await writeFile(authPath, "test fixture only", { mode: 0o644 });
+    await writeFile(join(codexHome, "auth.json"), "fixture", { mode: 0o644 });
     const report = await probeCodexCapabilities({
       codexHome,
       authMode: "chatgpt",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: false,
+      selection: DEFAULT_MODEL_SELECTION,
       runner: { async probe() { return { supported: true }; } },
       ...currentUidOption,
     });
-
     expect(report.components.auth).toBe("failed");
     expect(report.remediation.join(" ")).toContain("0600");
   });
 
-  it("never reads auth.json in API-key mode", async () => {
-    const codexHome = "/private/codex-home";
-    const statPaths: string[] = [];
+  it("probes only the one active pair in API-key mode", async () => {
+    const calls: unknown[] = [];
     const report = await probeCodexCapabilities({
-      codexHome,
+      codexHome: "/private/codex-home",
       authMode: "api_key",
       openAiApiKey: "test-key",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: false,
-      runner: { async probe() { return { supported: true }; } },
+      selection: DEFAULT_MODEL_SELECTION,
+      runner: {
+        async probe(input) {
+          calls.push(input);
+          return { supported: true };
+        },
+      },
       fileSystem: {
         async mkdir() {},
         async chmod() {},
-        async stat(path) {
-          statPaths.push(path);
+        async stat() {
           return {
             mode: 0o700,
             uid: 501,
@@ -101,102 +97,67 @@ describe("Codex startup capability report", () => {
       },
       currentUid: 501,
     });
-
     expect(report.ready).toBe(true);
-    expect(statPaths).toEqual([codexHome]);
-    expect(statPaths.some((path) => path.endsWith("auth.json"))).toBe(false);
-  });
-
-  it("fails unsupported max effort unless fallback is explicit", async () => {
-    const codexHome = await temporaryCodexHome();
-    const authPath = join(codexHome, "auth.json");
-    await writeFile(authPath, "test fixture only", { mode: 0o600 });
-    const efforts: string[] = [];
-    const runner: CapabilityPairRunner = {
-      async probe({ effort }) {
-        efforts.push(effort);
-        return effort === "max"
-          ? { supported: false, failure: "effort" }
-          : { supported: true };
-      },
-    };
-    const withoutFallback = await probeCodexCapabilities({
-      codexHome,
-      authMode: "chatgpt",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: false,
-      runner,
-      ...currentUidOption,
-    });
-    expect(withoutFallback.ready).toBe(false);
-    expect(withoutFallback.remediation.join(" ")).toContain(
-      "explicitly enable",
-    );
-    expect(
-      withoutFallback.profiles.find((profile) => profile.profile === "hard"),
-    ).toMatchObject({ requestedEffort: "max", state: "failed" });
-
-    efforts.length = 0;
-    const withFallback = await probeCodexCapabilities({
-      codexHome,
-      authMode: "chatgpt",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: true,
-      runner,
-      ...currentUidOption,
-    });
-    expect(withFallback.ready).toBe(true);
-    expect(
-      withFallback.profiles.find((profile) => profile.profile === "hard"),
-    ).toMatchObject({
-      requestedEffort: "max",
-      effectiveEffort: "xhigh",
+    expect(calls).toEqual([
+      { model: "gpt-5.6-luna", effort: "high" },
+    ]);
+    expect(report.selection).toMatchObject({
+      modelId: "gpt-5.6-luna",
+      reasoningEffort: "high",
       state: "ok",
     });
-    expect(withFallback.warnings.join(" ")).toContain("max to xhigh");
-    expect(efforts).toContain("xhigh");
   });
 
-  it("fails an unsupported model without changing its identifier", async () => {
+  it("fails readiness without probing when no account model is available", async () => {
     const codexHome = await temporaryCodexHome();
-    await writeFile(join(codexHome, "auth.json"), "test fixture only", {
-      mode: 0o600,
-    });
-    const runner: CapabilityPairRunner = {
-      async probe({ model }) {
-        return model === DEFAULT_MODEL_PROFILES.deep.model
-          ? { supported: false, failure: "model" }
-          : { supported: true };
-      },
-    };
+    await writeFile(join(codexHome, "auth.json"), "fixture", { mode: 0o600 });
+    let probes = 0;
     const report = await probeCodexCapabilities({
       codexHome,
       authMode: "chatgpt",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: false,
-      runner,
+      selection: null,
+      runner: {
+        async probe() {
+          probes += 1;
+          return { supported: true };
+        },
+      },
       ...currentUidOption,
     });
-
     expect(report.ready).toBe(false);
-    expect(report.remediation.join(" ")).toContain(
-      DEFAULT_MODEL_PROFILES.deep.model,
-    );
-    expect(report.profiles.find((profile) => profile.profile === "deep")?.model).toBe(
-      DEFAULT_MODEL_PROFILES.deep.model,
-    );
+    expect(report.components.models).toBe("failed");
+    expect(report.selection).toBeNull();
+    expect(probes).toBe(0);
+  });
+
+  it("does not retry another effort when the active pair is unsupported", async () => {
+    const codexHome = await temporaryCodexHome();
+    await writeFile(join(codexHome, "auth.json"), "fixture", { mode: 0o600 });
+    const calls: string[] = [];
+    const report = await probeCodexCapabilities({
+      codexHome,
+      authMode: "chatgpt",
+      selection: DEFAULT_MODEL_SELECTION,
+      runner: {
+        async probe({ effort }) {
+          calls.push(effort);
+          return { supported: false, failure: "effort" };
+        },
+      },
+      ...currentUidOption,
+    });
+    expect(report.ready).toBe(false);
+    expect(calls).toEqual(["high"]);
+    expect(report.remediation.join(" ")).toContain("high");
   });
 
   it("marks readiness false when cached ChatGPT auth is expired", async () => {
     const codexHome = await temporaryCodexHome();
-    await writeFile(join(codexHome, "auth.json"), "expired test fixture", {
-      mode: 0o600,
-    });
+    await writeFile(join(codexHome, "auth.json"), "expired", { mode: 0o600 });
     const report = await probeCodexCapabilities({
       codexHome,
       authMode: "chatgpt",
-      profiles: DEFAULT_MODEL_PROFILES,
-      allowReasoningFallback: false,
+      selection: DEFAULT_MODEL_SELECTION,
       runner: {
         async probe() {
           return { supported: false, failure: "auth" };
@@ -204,7 +165,6 @@ describe("Codex startup capability report", () => {
       },
       ...currentUidOption,
     });
-
     expect(report.ready).toBe(false);
     expect(report.components.auth).toBe("failed");
     expect(report.remediation.join(" ")).toContain("Re-enroll ChatGPT");

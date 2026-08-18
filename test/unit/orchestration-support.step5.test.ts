@@ -19,8 +19,9 @@ import {
   type CodexThreadRepository,
   type StoredCodexThread,
 } from "../../src/agent/thread-store.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
 import { buildUserSafeSynthesisInput } from "../../src/queue/handlers/turn-synthesize.js";
+
+const modelProfile = { model: "gpt-5.6-luna", effort: "high" } as const;
 
 function task(id: string, dependsOn: string[] = []): ExecutionTask {
   return executionTaskSchema.parse({
@@ -29,7 +30,6 @@ function task(id: string, dependsOn: string[] = []): ExecutionTask {
     purpose: `Establish the ${id} result with evidence.`,
     instructions: `Return the bounded ${id} finding.`,
     workspaceBinding: "primary-repo",
-    modelProfile: "main",
     permissionProfile: "read",
     dependsOn,
   });
@@ -108,7 +108,7 @@ describe("Step 5 bounded task graphs", () => {
     const baseRequest = {
       prompt: "bounded follow-up",
       outputSchema,
-      modelProfile: DEFAULT_MODEL_PROFILES.main,
+      modelProfile,
       permissionProfile: "read" as const,
       workingDirectory: "/tmp",
       skipGitRepoCheck: true,

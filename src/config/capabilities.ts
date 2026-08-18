@@ -8,11 +8,10 @@ import {
   type StructuredCodexRunner,
 } from "../agent/codex-client.js";
 import type {
-  ModelProfileName,
-  ModelProfiles,
   ReasoningEffort,
 } from "./model-profiles.js";
 import type { CodexAuthMode } from "../agent/child-environment.js";
+import type { ModelSelection } from "../agent/model-selection.js";
 
 type ComponentState = "ok" | "missing" | "failed" | "unknown";
 
@@ -61,13 +60,10 @@ export interface CapabilityPairRunner {
   }): Promise<PairProbeResult>;
 }
 
-export interface ProfileCapabilityResult {
-  profile: ModelProfileName;
-  model: string;
-  requestedEffort: ReasoningEffort;
-  effectiveEffort?: ReasoningEffort;
+export interface ModelCapabilityResult {
+  modelId: string;
+  reasoningEffort: ReasoningEffort;
   state: "ok" | "failed" | "unknown";
-  warning?: string;
   remediation?: string;
 }
 
@@ -79,8 +75,7 @@ export interface CodexCapabilityReport {
     models: ComponentState;
     sandbox: ComponentState;
   };
-  profiles: readonly ProfileCapabilityResult[];
-  warnings: readonly string[];
+  selection: ModelCapabilityResult | null;
   remediation: readonly string[];
 }
 
@@ -88,8 +83,7 @@ export interface ProbeCodexCapabilitiesOptions {
   codexHome: string;
   authMode: CodexAuthMode;
   openAiApiKey?: string;
-  profiles: ModelProfiles;
-  allowReasoningFallback: boolean;
+  selection: ModelSelection | null;
   runner: CapabilityPairRunner;
   signal?: AbortSignal;
   fileSystem?: CapabilityFileSystem;
@@ -224,76 +218,27 @@ async function inspectDiskAndAuth(
   }
 }
 
-function failedProfile(
-  profile: ModelProfileName,
-  model: string,
+function failedSelection(
+  modelId: string,
   effort: ReasoningEffort,
   failure: PairProbeFailure | undefined,
-): ProfileCapabilityResult {
+): ModelCapabilityResult {
   const remediation =
     failure === "model"
-      ? `Profile ${profile} uses unsupported model ${model}. Configure a supported exact model identifier.`
+      ? `The active model ${modelId} is unsupported. Refresh the ChatGPT model catalog and choose an advertised model.`
       : failure === "effort"
-        ? `Profile ${profile} uses unsupported effort ${effort}. Correct it or explicitly enable the documented max-to-xhigh fallback.`
+        ? `The active reasoning effort ${effort} is unsupported for ${modelId}. Refresh the model catalog and choose an advertised pair.`
         : failure === "auth"
-          ? `Profile ${profile} could not authenticate. Re-enroll ChatGPT or replace the API key.`
+          ? "The active model pair could not authenticate. Re-enroll ChatGPT or replace the API key."
           : failure === "sandbox"
-            ? `Profile ${profile} could not honor the read-only sandbox probe. Keep execution paused and inspect the pinned Codex runtime.`
-            : `Profile ${profile} failed its Codex capability probe. Inspect redacted runtime diagnostics.`;
+            ? "The active model pair could not honor the read-only sandbox probe. Keep execution paused and inspect the pinned Codex runtime."
+            : "The active model pair failed its Codex capability probe. Inspect redacted runtime diagnostics.";
   return {
-    profile,
-    model,
-    requestedEffort: effort,
+    modelId,
+    reasoningEffort: effort,
     state: "failed",
     remediation,
   };
-}
-
-async function probeProfile(
-  name: ModelProfileName,
-  options: ProbeCodexCapabilitiesOptions,
-): Promise<ProfileCapabilityResult> {
-  const configured = options.profiles[name];
-  const result = await options.runner.probe({
-    model: configured.model,
-    effort: configured.effort,
-    ...(options.signal === undefined ? {} : { signal: options.signal }),
-  });
-  if (result.supported) {
-    return {
-      profile: name,
-      model: configured.model,
-      requestedEffort: configured.effort,
-      effectiveEffort: configured.effort,
-      state: "ok",
-    };
-  }
-
-  if (
-    configured.effort === "max" &&
-    result.failure === "effort" &&
-    options.allowReasoningFallback
-  ) {
-    const fallback = await options.runner.probe({
-      model: configured.model,
-      effort: "xhigh",
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
-    if (fallback.supported) {
-      const warning = `Profile ${name}: requested max effort is unsupported; explicit ALLOW_REASONING_FALLBACK maps max to xhigh without changing model ${configured.model}.`;
-      return {
-        profile: name,
-        model: configured.model,
-        requestedEffort: "max",
-        effectiveEffort: "xhigh",
-        state: "ok",
-        warning,
-      };
-    }
-    return failedProfile(name, configured.model, "xhigh", fallback.failure);
-  }
-
-  return failedProfile(name, configured.model, configured.effort, result.failure);
 }
 
 export async function probeCodexCapabilities(
@@ -309,60 +254,81 @@ export async function probeCodexCapabilities(
         models: "unknown",
         sandbox: "unknown",
       },
-      profiles: Object.entries(options.profiles).map(([profile, value]) => ({
-        profile: profile as ModelProfileName,
-        model: value.model,
-        requestedEffort: value.effort,
-        state: "unknown",
-      })),
-      warnings: [],
+      selection:
+        options.selection === null
+          ? null
+          : {
+              modelId: options.selection.modelId,
+              reasoningEffort: options.selection.reasoningEffort,
+              state: "unknown",
+            },
       remediation: storage.remediation,
     };
   }
 
-  const profileNames = Object.keys(options.profiles) as ModelProfileName[];
-  const profiles: ProfileCapabilityResult[] = [];
-  for (const name of profileNames) {
-    try {
-      profiles.push(await probeProfile(name, options));
-    } catch (error) {
-      const failure =
-        error instanceof CodexRuntimeError
-          ? error.code === "CODEX_AUTH_FAILED"
-            ? "auth"
-            : error.code === "CODEX_MODEL_UNSUPPORTED"
-              ? "model"
-              : error.code === "CODEX_EFFORT_UNSUPPORTED"
-                ? "effort"
-                : "runtime"
-          : "runtime";
-      const configured = options.profiles[name];
-      profiles.push(
-        failedProfile(name, configured.model, configured.effort, failure),
-      );
-    }
+  if (options.selection === null) {
+    return {
+      ready: false,
+      components: {
+        disk: "ok",
+        auth: "ok",
+        models: "failed",
+        sandbox: "unknown",
+      },
+      selection: null,
+      remediation: [
+        "No account-advertised model is currently available. Reconnect ChatGPT or refresh Advanced model settings.",
+      ],
+    };
   }
 
-  const failed = profiles.filter((profile) => profile.state !== "ok");
-  const authFailed = failed.some((profile) =>
-    profile.remediation?.includes("authenticate"),
-  );
-  const warnings = profiles.flatMap((profile) =>
-    profile.warning === undefined ? [] : [profile.warning],
-  );
-  const remediation = profiles.flatMap((profile) =>
-    profile.remediation === undefined ? [] : [profile.remediation],
-  );
+  let selection: ModelCapabilityResult;
+  try {
+    const result = await options.runner.probe({
+      model: options.selection.modelId,
+      effort: options.selection.reasoningEffort,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    selection = result.supported
+      ? {
+          modelId: options.selection.modelId,
+          reasoningEffort: options.selection.reasoningEffort,
+          state: "ok",
+        }
+      : failedSelection(
+          options.selection.modelId,
+          options.selection.reasoningEffort,
+          result.failure,
+        );
+  } catch (error) {
+    const failure =
+      error instanceof CodexRuntimeError
+        ? error.code === "CODEX_AUTH_FAILED"
+          ? "auth"
+          : error.code === "CODEX_MODEL_UNSUPPORTED"
+            ? "model"
+            : error.code === "CODEX_EFFORT_UNSUPPORTED"
+              ? "effort"
+              : "runtime"
+        : "runtime";
+    selection = failedSelection(
+      options.selection.modelId,
+      options.selection.reasoningEffort,
+      failure,
+    );
+  }
+  const ready = selection.state === "ok";
+  const remediation = selection.remediation === undefined ? [] : [selection.remediation];
+  const authFailed = selection.remediation?.includes("authenticate") ?? false;
   return {
-    ready: failed.length === 0,
+    ready,
     components: {
       disk: "ok",
       auth: authFailed ? "failed" : "ok",
-      models: failed.length === 0 ? "ok" : "failed",
-      sandbox: failed.length === 0 ? "ok" : "failed",
+      models: ready ? "ok" : "failed",
+      sandbox: ready ? "ok" : "failed",
     },
-    profiles,
-    warnings,
+    selection,
     remediation,
   };
 }

@@ -7,7 +7,6 @@ import {
   EnvironmentValidationError,
   loadDatabaseMigrationEnvironment,
   loadEnvironment,
-  modelProfilesFromEnvironment,
 } from "../../src/config/env.js";
 
 function validEnvironment(
@@ -56,21 +55,17 @@ describe("loadDatabaseMigrationEnvironment", () => {
 });
 
 describe("loadEnvironment", () => {
-  it("normalizes documented defaults, handles, paths, and model profiles", () => {
+  it("normalizes documented defaults, handles, and paths", () => {
     const environment = loadEnvironment(validEnvironment());
 
     expect(environment.OWNER_PHONE_NUMBER).toBe("+15551234567");
-    expect(environment.AGENT_OWNER_HANDLES).toEqual(["+15551234567"]);
+    expect(environment.AGENT_OWNER_HANDLES).toEqual([]);
     expect(environment.CODEX_HOME).toBe(resolve(".codex-agent"));
     expect(environment.AGENT_WORKSPACE_ROOT).toBe(
       resolve(".agent-workspaces"),
     );
     expect(environment.INBOUND_DEBOUNCE_MS).toBe(4_000);
     expect(environment.LOG_MESSAGE_CONTENT).toBe(false);
-    expect(modelProfilesFromEnvironment(environment).deep).toEqual({
-      model: "gpt-5.6-sol",
-      effort: "max",
-    });
   });
 
   it("reports all missing required variables in one actionable error", () => {
@@ -96,9 +91,43 @@ describe("loadEnvironment", () => {
     expect(message).not.toContain("undefined");
   });
 
+  it("boots production without any dashboard credential in the environment", () => {
+    expect(() =>
+      loadEnvironment(validEnvironment({ NODE_ENV: "production" })),
+    ).not.toThrow();
+  });
+
+  it.each(["AGENT_PASSWORD", "DASHBOARD_SETUP_SECRET"])(
+    "rejects the removed %s variable even when it is empty",
+    (key) => {
+      for (const value of ["", "legacy-secret-must-not-be-used"]) {
+        let error: unknown;
+        try {
+          loadEnvironment(validEnvironment({ [key]: value }));
+        } catch (caught) {
+          error = caught;
+        }
+
+        expect(error).toBeInstanceOf(EnvironmentValidationError);
+        expect((error as Error).message).toContain(key);
+        expect((error as Error).message).toContain("no longer supported");
+        if (value !== "") {
+          expect((error as Error).message).not.toContain(value);
+        }
+      }
+    },
+  );
+
   it.each([
     ["database protocol", { DATABASE_URL: "https://database.example.com" }],
     ["owner phone", { OWNER_PHONE_NUMBER: "not-a-phone" }],
+    [
+      "former Render owner phone",
+      {
+        OWNER_PHONE_NUMBER: undefined,
+        OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123: "9495550123",
+      },
+    ],
     ["encryption key", { APP_ENCRYPTION_KEY: "too-short" }],
     ["filesystem root", { CODEX_HOME: "/" }],
     ["path traversal", { AGENT_WORKSPACE_ROOT: "../outside" }],
@@ -108,13 +137,23 @@ describe("loadEnvironment", () => {
     ],
     ["duration", { MAX_TASK_RUNTIME_MS: "0" }],
     ["debounce", { INBOUND_DEBOUNCE_MS: "2500" }],
-    ["model", { MODEL_MAIN: "not a model/name" }],
-    ["effort", { MODEL_HARD_EFFORT: "ultra" }],
     ["boolean", { LOG_MESSAGE_CONTENT: "yes" }],
   ])("rejects malformed %s configuration", (_label, override) => {
     expect(() => loadEnvironment(validEnvironment(override))).toThrow(
       EnvironmentValidationError,
     );
+  });
+
+  it("ignores removed model-profile environment variables", () => {
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          MODEL_MAIN: "not a model/name",
+          MODEL_HARD_EFFORT: "ultra",
+          ALLOW_REASONING_FALLBACK: "true",
+        }),
+      ),
+    ).not.toThrow();
   });
 
   it("requires an API key only in API-key authentication mode", () => {
@@ -144,7 +183,14 @@ describe("loadEnvironment", () => {
     expect(environment.SPECTRUM_PROJECT_SECRET).toBeUndefined();
   });
 
-  it("uses AGENT_OWNER_HANDLES only as a backwards-compatible fallback", () => {
+  it("preserves legacy OWNER_PHONE_NUMBER as a migration input", () => {
+    const environment = loadEnvironment(validEnvironment());
+
+    expect(environment.OWNER_PHONE_NUMBER).toBe("+15551234567");
+    expect(environment.AGENT_OWNER_HANDLES).toEqual([]);
+  });
+
+  it("preserves AGENT_OWNER_HANDLES as a legacy migration input", () => {
     const environment = loadEnvironment(
       validEnvironment({
         OWNER_PHONE_NUMBER: undefined,
@@ -158,15 +204,75 @@ describe("loadEnvironment", () => {
     ]);
   });
 
-  it("requires a new owner phone number or the legacy owner fallback", () => {
+  it("preserves the former Render owner-phone alias for migration", () => {
+    const environment = loadEnvironment(
+      validEnvironment({
+        OWNER_PHONE_NUMBER: undefined,
+        OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123: "+19495550123",
+      }),
+    );
+
+    expect(environment.OWNER_PHONE_NUMBER).toBeUndefined();
+    expect(
+      environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123,
+    ).toBe("+19495550123");
+    expect(environment.AGENT_OWNER_HANDLES).toEqual([]);
+  });
+
+  it("rejects conflicting owner-phone migration values", () => {
     expect(() =>
       loadEnvironment(
         validEnvironment({
-          OWNER_PHONE_NUMBER: undefined,
-          AGENT_OWNER_HANDLES: undefined,
+          OWNER_PHONE_NUMBER: "+15551234567",
+          OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123: "+19495550123",
         }),
       ),
-    ).toThrow(/OWNER_PHONE_NUMBER is required/);
+    ).toThrow(/must match when both are set/u);
+  });
+
+  it("loads a fresh environment without an owner and normalizes an empty authorization list", () => {
+    const environment = loadEnvironment(
+      validEnvironment({
+        OWNER_PHONE_NUMBER: undefined,
+        OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123: undefined,
+        AGENT_OWNER_HANDLES: undefined,
+      }),
+    );
+
+    expect(environment.OWNER_PHONE_NUMBER).toBeUndefined();
+    expect(
+      environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123,
+    ).toBeUndefined();
+    expect(environment.AGENT_OWNER_HANDLES).toEqual([]);
+  });
+
+  it("validates a fresh Railway runtime without an owner or explicit deployment ID", () => {
+    const environment = loadEnvironment(
+      validEnvironment({
+        NODE_ENV: "production",
+        DEPLOYMENT_ID: undefined,
+        OWNER_PHONE_NUMBER: undefined,
+        OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123: undefined,
+        AGENT_OWNER_HANDLES: undefined,
+        SPECTRUM_PROJECT_ID: undefined,
+        SPECTRUM_PROJECT_SECRET: undefined,
+        RAILWAY_SERVICE_ID: "6f6efdf3-32ff-454f-a8fe-9ab8792667cc",
+        RAILWAY_DEPLOYMENT_ID: "deployment-123",
+        RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+        CODEX_HOME: "/var/data/codex",
+        AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
+      }),
+    );
+
+    expect(environment.DEPLOYMENT_ID).toBe(
+      deploymentIdFromRailwayServiceId(
+        "6f6efdf3-32ff-454f-a8fe-9ab8792667cc",
+      ),
+    );
+    expect(environment.OWNER_PHONE_NUMBER).toBeUndefined();
+    expect(environment.AGENT_OWNER_HANDLES).toEqual([]);
+    expect(environment.SPECTRUM_PROJECT_ID).toBeUndefined();
+    expect(environment.SPECTRUM_PROJECT_SECRET).toBeUndefined();
   });
 
   it("requires legacy Spectrum credentials to be supplied as a pair", () => {
@@ -278,6 +384,32 @@ describe("loadEnvironment", () => {
           RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
           CODEX_HOME: "/var/data/codex",
           AGENT_WORKSPACE_ROOT: "/tmp/workspaces",
+        }),
+      ),
+    ).toThrow(
+      /AGENT_WORKSPACE_ROOT must be under RAILWAY_VOLUME_MOUNT_PATH/u,
+    );
+
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_ID: "service-123",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/var/data",
+          AGENT_WORKSPACE_ROOT: "/var/data/workspaces",
+        }),
+      ),
+    ).toThrow(/CODEX_HOME must be under RAILWAY_VOLUME_MOUNT_PATH/u);
+
+    expect(() =>
+      loadEnvironment(
+        validEnvironment({
+          NODE_ENV: "production",
+          RAILWAY_SERVICE_ID: "service-123",
+          RAILWAY_VOLUME_MOUNT_PATH: "/var/data",
+          CODEX_HOME: "/var/data/codex",
+          AGENT_WORKSPACE_ROOT: "/var/data",
         }),
       ),
     ).toThrow(

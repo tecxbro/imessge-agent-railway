@@ -5,8 +5,8 @@ import type {
   InteractionRuntimeResult,
 } from "../../src/agent/interaction-runtime.js";
 import type { InteractionDecision } from "../../src/agent/schemas.js";
+import { DEFAULT_MODEL_SELECTION } from "../../src/agent/model-selection.js";
 import type { CommandHandlersDependencies } from "../../src/commands/handlers.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
 import { loadPromptBundle } from "../../src/config/prompt-bundle.js";
 import {
   createTurnPlanHandler,
@@ -37,17 +37,14 @@ function planContext(currentUserMessage: string): TurnPlanContext {
       {
         workspaceBinding: "primary-repo",
         permissionProfiles: ["read"],
-        modelProfiles: ["main", "balanced"],
       },
       {
         workspaceBinding: "research",
         permissionProfiles: ["network-read"],
-        modelProfiles: ["balanced"],
       },
     ],
     priorStatusMessages: [],
-    modelOverride: "auto",
-    routingIntent: { kind: "conversation" },
+    modelSelection: DEFAULT_MODEL_SELECTION,
     interactionWorkingDirectory: "/tmp",
   };
 }
@@ -60,10 +57,9 @@ function commandHandlers(): CommandHandlersDependencies {
       work: "ready",
       memory: "disabled",
       activeTaskCount: 0,
-      modelProfile: "auto",
+      modelSelection: DEFAULT_MODEL_SELECTION,
     } as const)),
-    getModelProfile: vi.fn(async () => "auto" as const),
-    setModelProfile: vi.fn(async () => undefined),
+    getModelSelection: vi.fn(async () => DEFAULT_MODEL_SELECTION),
     cancelActive: vi.fn(async () => ({ canceledCount: 0 })),
     resetInteractionThread: vi.fn(async () => undefined),
     listAgents: vi.fn(async () => []),
@@ -116,7 +112,6 @@ describe("Step 5 turn-plan handler", () => {
   it("commits a direct answer after exactly one interaction call and creates no task", async () => {
     const decision: InteractionDecision = {
       mode: "direct",
-      modelProfile: "main",
       userMessage: "Hey! What’s up?",
       statusMessage: null,
       tasks: [],
@@ -128,7 +123,6 @@ describe("Step 5 turn-plan handler", () => {
     const handler = createTurnPlanHandler({
       ...fake,
       commandHandlers: commandHandlers(),
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
       encrypt: (plaintext) => `encrypted:${plaintext}`,
     });
@@ -136,6 +130,11 @@ describe("Step 5 turn-plan handler", () => {
     await handler(payload);
 
     expect(fake.interaction.run).toHaveBeenCalledTimes(1);
+    expect(fake.interaction.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelProfile: { model: "gpt-5.6-luna", effort: "high" },
+      }),
+    );
     expect(fake.repository.commitFinal).toHaveBeenCalledWith(
       expect.objectContaining({
         payload,
@@ -154,7 +153,6 @@ describe("Step 5 turn-plan handler", () => {
   it("commits a bounded DAG and enqueues both independent roots together", async () => {
     const decision: InteractionDecision = {
       mode: "delegate",
-      modelProfile: "main",
       userMessage: null,
       statusMessage: "I’m checking the local behavior and provider contract now.",
       tasks: [
@@ -164,7 +162,6 @@ describe("Step 5 turn-plan handler", () => {
           purpose: "Inspect local behavior.",
           instructions: "Return local evidence.",
           workspaceBinding: "primary-repo",
-          modelProfile: "main",
           permissionProfile: "read",
           dependsOn: [],
         },
@@ -174,7 +171,6 @@ describe("Step 5 turn-plan handler", () => {
           purpose: "Check provider guidance.",
           instructions: "Return official contract evidence.",
           workspaceBinding: "research",
-          modelProfile: "balanced",
           permissionProfile: "network-read",
           dependsOn: [],
         },
@@ -184,7 +180,6 @@ describe("Step 5 turn-plan handler", () => {
           purpose: "Compare the findings.",
           instructions: "Report the material mismatch.",
           workspaceBinding: "primary-repo",
-          modelProfile: "main",
           permissionProfile: "read",
           dependsOn: ["inspect", "research"],
         },
@@ -198,7 +193,6 @@ describe("Step 5 turn-plan handler", () => {
     const handler = createTurnPlanHandler({
       ...fake,
       commandHandlers: commandHandlers(),
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
       encrypt: (plaintext) => `encrypted:${plaintext}`,
       sendStatus,
@@ -231,7 +225,6 @@ describe("Step 5 turn-plan handler", () => {
   it("handles slash commands without memory recall or any interaction-model call", async () => {
     const unusedDecision: InteractionDecision = {
       mode: "direct",
-      modelProfile: "main",
       userMessage: "must not be used",
       statusMessage: null,
       tasks: [],
@@ -242,7 +235,6 @@ describe("Step 5 turn-plan handler", () => {
     const handler = createTurnPlanHandler({
       ...fake,
       commandHandlers: commandHandlers(),
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
       encrypt: (plaintext) => `encrypted:${plaintext}`,
     });

@@ -60,7 +60,7 @@ Production-oriented private iMessage agent starter. Keep every module justified 
 - Ignore outbound echoes/unsupported v1 events; use stable client GUIDs, persisted send cursors, and `finally` typing cleanup.
 - Pin Codex CLI/SDK together and set `CODEX_HOME` explicitly.
 - Start or resume threads only through `codex-client.ts` and `thread-store.ts`.
-- Resolve model/effort through `model-router.ts`, apply permission profiles in code, and capability-probe configured pairs.
+- Resolve preferred/effective model selection through `model-selection.ts`, apply permission profiles in code, and capability-probe the effective pair.
 - Test cancellation and child-process cleanup.
 
 ## Database, queue, and memory

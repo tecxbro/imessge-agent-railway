@@ -1,6 +1,5 @@
 {
   "mode": "delegate",
-  "modelProfile": "main",
   "userMessage": null,
   "statusMessage": "I’m checking the runtime and the failing path now.",
   "tasks": [
@@ -10,7 +9,6 @@
       "purpose": "Find the failure cause",
       "instructions": "Inspect the specified workspace and return the root cause with evidence.",
       "workspaceBinding": "primary-repo",
-      "modelProfile": "balanced",
       "permissionProfile": "read",
       "dependsOn": []
     }

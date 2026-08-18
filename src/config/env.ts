@@ -3,13 +3,6 @@ import { isAbsolute, parse, relative, resolve } from "node:path";
 
 import { z } from "zod";
 
-import {
-  modelIdentifierSchema,
-  modelProfilesSchema,
-  reasoningEffortSchema,
-  type ModelProfiles,
-} from "./model-profiles.js";
-
 const emptyToUndefined = (value: unknown): unknown =>
   typeof value === "string" && value.trim() === "" ? undefined : value;
 
@@ -185,6 +178,11 @@ const rawEnvironmentSchema = z
     OWNER_PHONE_NUMBER: optionalText(
       e164PhoneNumberSchema("OWNER_PHONE_NUMBER"),
     ),
+    OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123: optionalText(
+      e164PhoneNumberSchema(
+        "OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123",
+      ),
+    ),
     AGENT_OWNER_HANDLES: z.preprocess(
       emptyToUndefined,
       ownerHandlesSchema.optional(),
@@ -217,22 +215,6 @@ const rawEnvironmentSchema = z
           .regex(/^[a-z0-9][a-z0-9-]*$/i)
           .default("imessage-agent"),
       ),
-
-    // Model profiles
-    MODEL_FAST: modelIdentifierSchema.default("gpt-5.6-luna"),
-    MODEL_FAST_EFFORT: reasoningEffortSchema.default("medium"),
-    MODEL_MAIN: modelIdentifierSchema.default("gpt-5.6-luna"),
-    MODEL_MAIN_EFFORT: reasoningEffortSchema.default("high"),
-    MODEL_BALANCED: modelIdentifierSchema.default("gpt-5.6-terra"),
-    MODEL_BALANCED_EFFORT: reasoningEffortSchema.default("high"),
-    MODEL_HARD: modelIdentifierSchema.default("gpt-5.6-luna"),
-    MODEL_HARD_EFFORT: reasoningEffortSchema.default("max"),
-    MODEL_DEEP: modelIdentifierSchema.default("gpt-5.6-sol"),
-    MODEL_DEEP_EFFORT: reasoningEffortSchema.default("max"),
-    ALLOW_REASONING_FALLBACK: booleanFromEnvironment(
-      "ALLOW_REASONING_FALLBACK",
-      false,
-    ),
 
     // Operational limits, retention, and logging
     INBOUND_DEBOUNCE_MS: integerFromEnvironment(
@@ -295,7 +277,7 @@ const rawEnvironmentSchema = z
   })
   .superRefine((environment, context) => {
     // Cross-field safety checks prevent individually valid values from creating
-    // an unsafe combined authentication, concurrency, or storage layout.
+    // an unsafe combined provider, concurrency, or storage layout.
     if (
       (environment.SPECTRUM_PROJECT_ID === undefined) !==
       (environment.SPECTRUM_PROJECT_SECRET === undefined)
@@ -313,14 +295,17 @@ const rawEnvironmentSchema = z
     }
 
     if (
-      environment.OWNER_PHONE_NUMBER === undefined &&
-      environment.AGENT_OWNER_HANDLES === undefined
+      environment.OWNER_PHONE_NUMBER !== undefined &&
+      environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123 !==
+        undefined &&
+      environment.OWNER_PHONE_NUMBER !==
+        environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123
     ) {
       context.addIssue({
         code: "custom",
-        path: ["OWNER_PHONE_NUMBER"],
+        path: ["OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123"],
         message:
-          "OWNER_PHONE_NUMBER is required unless AGENT_OWNER_HANDLES is set by an existing deployment",
+          "OWNER_PHONE_NUMBER and OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123 must match when both are set",
       });
     }
 
@@ -404,18 +389,10 @@ const rawEnvironmentSchema = z
       }
     }
   })
-  .transform((environment) => {
-    const ownerPhoneNumber = environment.OWNER_PHONE_NUMBER;
-
-    return {
-      ...environment,
-      OWNER_PHONE_NUMBER: ownerPhoneNumber,
-      AGENT_OWNER_HANDLES:
-        ownerPhoneNumber === undefined
-          ? environment.AGENT_OWNER_HANDLES!
-          : [ownerPhoneNumber],
-    };
-  });
+  .transform((environment) => ({
+    ...environment,
+    AGENT_OWNER_HANDLES: environment.AGENT_OWNER_HANDLES ?? [],
+  }));
 
 export type Environment = z.infer<typeof rawEnvironmentSchema>;
 export type DatabaseMigrationEnvironment = z.infer<
@@ -532,40 +509,27 @@ export function loadEnvironment(source?: NodeJS.ProcessEnv): Environment {
     loadLocalEnvironmentFile();
   }
 
-  const result = rawEnvironmentSchema.safeParse(
-    withRailwayDeploymentId(source ?? process.env),
-  );
+  const environmentSource = withRailwayDeploymentId(source ?? process.env);
+  const removedCredentialIssues: z.core.$ZodIssue[] = [
+    "AGENT_PASSWORD",
+    "DASHBOARD_SETUP_SECRET",
+  ]
+    .filter((key) => Object.hasOwn(environmentSource, key))
+    .map((key) => ({
+      code: "custom",
+      path: [key],
+      message: `${key} is no longer supported; remove it from the service environment`,
+      input: undefined,
+    }));
+  if (removedCredentialIssues.length > 0) {
+    throw new EnvironmentValidationError(removedCredentialIssues);
+  }
+
+  const result = rawEnvironmentSchema.safeParse(environmentSource);
 
   if (!result.success) {
     throw new EnvironmentValidationError(result.error.issues);
   }
 
   return result.data;
-}
-
-export function modelProfilesFromEnvironment(
-  environment: Environment,
-): ModelProfiles {
-  return modelProfilesSchema.parse({
-    fast: {
-      model: environment.MODEL_FAST,
-      effort: environment.MODEL_FAST_EFFORT,
-    },
-    main: {
-      model: environment.MODEL_MAIN,
-      effort: environment.MODEL_MAIN_EFFORT,
-    },
-    balanced: {
-      model: environment.MODEL_BALANCED,
-      effort: environment.MODEL_BALANCED_EFFORT,
-    },
-    hard: {
-      model: environment.MODEL_HARD,
-      effort: environment.MODEL_HARD_EFFORT,
-    },
-    deep: {
-      model: environment.MODEL_DEEP,
-      effort: environment.MODEL_DEEP_EFFORT,
-    },
-  });
 }

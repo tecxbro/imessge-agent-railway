@@ -61,7 +61,6 @@ The delimiters provide structure; they are not authorization. User text, memorie
 ```json
 {
   "mode": "delegate",
-  "modelProfile": "main",
   "statusMessage": "i’m checking the runtime and the failing path now.",
   "tasks": [
     {
@@ -70,7 +69,6 @@ The delimiters provide structure; they are not authorization. User text, memorie
       "purpose": "find the failure cause",
       "instructions": "Inspect the specified workspace and return the root cause with evidence.",
       "workspaceBinding": "primary-repo",
-      "modelProfile": "balanced",
       "permissionProfile": "read",
       "dependsOn": []
     }
@@ -80,7 +78,9 @@ The delimiters provide structure; they are not authorization. User text, memorie
 }
 ```
 
-The model may propose only allowed task and profile values. Code validates limits and permission mapping before enqueue.
+The model may propose only allowed task values. Code validates graph limits and
+permission mapping before enqueue; the chain's model pair is code-owned and is
+not part of structured model output.
 
 ## 5. Direct-answer policy
 

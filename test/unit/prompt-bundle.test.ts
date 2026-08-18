@@ -39,35 +39,35 @@ describe("prompt bundle", () => {
     expect(after.version).not.toBe(before.version);
   });
 
-  it("keeps voice adaptive, natural, concise, and restrained with emojis", async () => {
+  it("keeps the iMessage voice direct, short, lowercase, and multi-message", async () => {
     const bundle = await loadPromptBundle();
     const voice = bundle.prompts["voice-policy.md"]?.content ?? "";
     const interaction = bundle.prompts["interaction.system.md"]?.content ?? "";
 
-    expect(voice).toContain("Lead with the answer, decision, or outcome.");
+    expect(voice).toContain("Talk like a smart friend inside iMessage.");
+    expect(voice).toContain("Aim for 120 characters in each intended message");
+    expect(voice).toContain("try not to exceed 150");
     expect(voice).toContain(
-      "Match the user’s tone, casing, punctuation, and approximate message length when natural.",
-    );
-    expect(voice).toContain(
-      "In casual conversation, prefer a short human reaction over an unnecessary explanation or offer to help.",
-    );
-    expect(voice).toContain(
-      "Subtle wit, dry humor, or mild sass is allowed when it fits naturally.",
+      "Each blank-line-separated block is one intended iMessage bubble.",
     );
     expect(voice).toContain(
-      "Use emojis only when the user has used them recently, and keep them rare.",
+      "rewrite or divide the answer at complete-thought boundaries",
+    );
+    expect(voice).toContain(
+      "Never split a word, sentence, URL, path, command, code fragment, or coherent thought merely to meet the target.",
+    );
+    expect(voice).toContain("Ask only one short question per turn.");
+    expect(voice).toContain("Use natural lowercase.");
+    expect(voice).toContain("Never use customer-support language.");
+    expect(voice).toContain("Separate intended messages with a blank line.");
+    expect(interaction).toContain(
+      "Follow `voice-policy.md` for all user-facing text in both `userMessage` and `statusMessage`.",
     );
     expect(interaction).toContain(
-      "Match the user’s tone, casing, punctuation, and approximate message length when natural.",
+      "Compose longer answers as natural, complete-thought messages",
     );
     expect(interaction).toContain(
-      "In casual conversation, prefer a short human reaction over an unnecessary explanation or offer to help.",
-    );
-    expect(interaction).toContain(
-      "Subtle wit, dry humor, or mild sass is allowed when it fits naturally.",
-    );
-    expect(interaction).toContain(
-      "Use emojis only when the user has used them recently, and keep them rare.",
+      "Never mechanically slice text at the character target.",
     );
   });
 });

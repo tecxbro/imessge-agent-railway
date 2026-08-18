@@ -1,6 +1,5 @@
 {
   "mode": "direct",
-  "modelProfile": "main",
   "userMessage": "Hey! What’s up?",
   "statusMessage": null,
   "tasks": [],

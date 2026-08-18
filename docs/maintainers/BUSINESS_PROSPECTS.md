@@ -159,7 +159,7 @@ Main components:
 4. **OpenAI:** ChatGPT entitlement in login mode or token-based API cost in API-key mode.
 5. **Support:** deployment, provider auth, failed skills, and third-party API changes.
 
-Model routing is economically important. Luna should handle high-frequency interaction; Terra/Sol should be reserved for tasks where the quality gain is material. Track cost per successfully completed task, not cost per model call.
+Account-aware model selection is economically important. Track cost per successfully completed task for the owner's deployment-wide selection; do not introduce request-complexity routing without a separate product decision.
 
 ## 8. Go-to-market
 
@@ -187,7 +187,7 @@ A polished GitHub template with:
 - How to make an iMessage agent survive interruptions and retries.
 - ChatGPT login in private cloud deployments without pretending it is OAuth.
 - Operational database versus semantic memory.
-- Model routing and unit economics.
+- Account-aware model selection and unit economics.
 - Security boundaries for text-triggered coding agents.
 
 ## 9. Activation funnel

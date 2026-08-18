@@ -9,10 +9,7 @@ import {
   interactionDecisionSchema,
   type ExecutionResult,
 } from "../../agent/schemas.js";
-import {
-  modelProfileNameSchema,
-  type ModelProfileName,
-} from "../../config/model-profiles.js";
+import { modelSelectionSchema } from "../../agent/model-selection.js";
 import { permissionProfileNameSchema } from "../../security/permissions.js";
 import type {
   ExecutionCapability,
@@ -71,7 +68,6 @@ export interface OrchestrationRepositoryOptions {
     ownerId: string;
     spaceId: string;
   }): Promise<readonly ExecutionCapability[]> | readonly ExecutionCapability[];
-  routingIntent?(text: string): TurnPlanContext["routingIntent"];
   priorStatusMessages?(
     spaceId: string,
   ): Promise<TurnPlanContext["priorStatusMessages"]>;
@@ -98,7 +94,6 @@ function taskStateForResult(result: ExecutionResult) {
 function decisionForStorage(decision: ReturnType<typeof interactionDecisionSchema.parse>) {
   return {
     mode: decision.mode,
-    modelProfile: decision.modelProfile,
     hasUserMessage: decision.userMessage !== null,
     hasStatusMessage: decision.statusMessage !== null,
     waitForTasks: decision.waitForTasks,
@@ -107,7 +102,6 @@ function decisionForStorage(decision: ReturnType<typeof interactionDecisionSchem
       id: task.id,
       agentName: task.agentName,
       workspaceBinding: task.workspaceBinding ?? task.agentName,
-      modelProfile: task.modelProfile,
       permissionProfile: task.permissionProfile,
       dependsOn: task.dependsOn,
     })),
@@ -168,7 +162,8 @@ export class OrchestrationRepository {
         canceledAt: chains.canceledAt,
         spaceId: spaces.id,
         deploymentId: spaces.deploymentId,
-        modelOverride: spaces.modelProfileOverride,
+        modelId: chains.modelId,
+        reasoningEffort: chains.reasoningEffort,
         recoverySummary: spaces.interactionSummary,
       })
       .from(chains)
@@ -266,10 +261,10 @@ export class OrchestrationRepository {
           : { summary: await this.options.decrypt(agent.summary) }),
       })),
     );
-    const modelOverride =
-      envelope.modelOverride === null
-        ? "auto"
-        : modelProfileNameSchema.parse(envelope.modelOverride);
+    const modelSelection = modelSelectionSchema.parse({
+      modelId: envelope.modelId,
+      reasoningEffort: envelope.reasoningEffort,
+    });
     const combinedTurnText = sendable
       .map((message) =>
         message.carried ? `[Earlier message] ${message.text}` : message.text,
@@ -292,12 +287,7 @@ export class OrchestrationRepository {
       capabilities: await this.options.capabilities(identity),
       priorStatusMessages:
         (await this.options.priorStatusMessages?.(envelope.spaceId)) ?? [],
-      modelOverride,
-      routingIntent:
-        this.options.routingIntent?.(combinedTurnText) ?? {
-          kind: "conversation",
-          contextCharacters: combinedTurnText.length,
-        },
+      modelSelection,
       interactionWorkingDirectory: this.options.interactionWorkingDirectory,
       ...(envelope.recoverySummary === null
         ? {}
@@ -380,10 +370,6 @@ export class OrchestrationRepository {
           decisionJson: decisionForStorage(decision),
           promptVersion: input.promptVersion,
           terminalErrorCode: null,
-          ...(input.payload.expectedState === "queued" &&
-          "selectedModelProfile" in input
-            ? { modelProfile: input.selectedModelProfile }
-            : {}),
           updatedAt: new Date(),
         })
         .where(eq(chains.id, chain.id));
@@ -447,7 +433,7 @@ export class OrchestrationRepository {
             ownerId,
             agentName: task.agentName,
             workspaceBinding,
-            lastModelProfile: task.modelProfile,
+            lastModelProfile: "main",
             status: "active",
             lastUsedAt: new Date(),
           })
@@ -458,7 +444,7 @@ export class OrchestrationRepository {
               agentThreads.workspaceBinding,
             ],
             set: {
-              lastModelProfile: task.modelProfile,
+              lastModelProfile: "main",
               lastUsedAt: new Date(),
               updatedAt: new Date(),
             },
@@ -480,7 +466,7 @@ export class OrchestrationRepository {
           name: task.id,
           purpose: await this.options.encrypt(task.purpose),
           instructionsCiphertext: persisted.instructionsCiphertext,
-          modelProfile: task.modelProfile,
+          modelProfile: "main",
           permissionProfile: task.permissionProfile,
           state: "queued",
           dependsOnJson: task.dependsOn.map((dependency) => {
@@ -497,7 +483,6 @@ export class OrchestrationRepository {
         .update(chains)
         .set({
           state: "executing",
-          modelProfile: input.selectedModelProfile,
           promptVersion: input.promptVersion,
           decisionJson: decisionForStorage(decision),
           updatedAt: new Date(),
@@ -522,7 +507,6 @@ export class OrchestrationRepository {
       .update(chains)
       .set({
         state: "complete",
-        modelProfile: input.selectedModelProfile,
         promptVersion: input.promptVersion,
         decisionJson: decisionForStorage(decision),
         completedAt: new Date(),
@@ -557,7 +541,8 @@ export class OrchestrationRepository {
           logicalId: executionTasks.name,
           purpose: executionTasks.purpose,
           instructionsCiphertext: executionTasks.instructionsCiphertext,
-          modelProfile: executionTasks.modelProfile,
+          modelId: chains.modelId,
+          reasoningEffort: chains.reasoningEffort,
           permissionProfile: executionTasks.permissionProfile,
           dependencies: executionTasks.dependsOnJson,
           taskState: executionTasks.state,
@@ -632,7 +617,6 @@ export class OrchestrationRepository {
         purpose: await this.options.decrypt(row.purpose),
         instructions: await this.options.decrypt(row.instructionsCiphertext),
         workspaceBinding: row.workspaceBinding,
-        modelProfile: modelProfileNameSchema.parse(row.modelProfile),
         permissionProfile: permissionProfileNameSchema.parse(
           row.permissionProfile,
         ),
@@ -658,6 +642,10 @@ export class OrchestrationRepository {
       return {
         ownerId: row.ownerId,
         task,
+        modelSelection: modelSelectionSchema.parse({
+          modelId: row.modelId,
+          reasoningEffort: row.reasoningEffort,
+        }),
         maximumPermissionProfile: task.permissionProfile,
         workspaceRoot: this.options.workspaceRoot,
         relevantContext:
@@ -692,7 +680,6 @@ export class OrchestrationRepository {
           chainState: chains.state,
           chainVersion: chains.version,
           canceledAt: chains.canceledAt,
-          modelProfile: executionTasks.modelProfile,
         })
         .from(executionTasks)
         .innerJoin(chains, eq(chains.id, executionTasks.chainId))
@@ -730,7 +717,7 @@ export class OrchestrationRepository {
               ? {}
               : { codexThreadId: input.threadId }),
             summary: await this.options.encrypt(result.userSafeSummary),
-            lastModelProfile: row.modelProfile,
+            lastModelProfile: "main",
             lastUsedAt: new Date(),
             updatedAt: new Date(),
           })
@@ -799,7 +786,8 @@ export class OrchestrationRepository {
         chainVersion: chains.version,
         state: chains.state,
         canceledAt: chains.canceledAt,
-        modelProfile: chains.modelProfile,
+        modelId: chains.modelId,
+        reasoningEffort: chains.reasoningEffort,
         spaceId: spaces.id,
         deploymentId: spaces.deploymentId,
         recoverySummary: spaces.interactionSummary,
@@ -884,10 +872,10 @@ export class OrchestrationRepository {
       userRequest,
       conversationHistory: [],
       terminalResults,
-      selectedModelProfile:
-        chain.modelProfile === null
-          ? "main"
-          : modelProfileNameSchema.parse(chain.modelProfile),
+      modelSelection: modelSelectionSchema.parse({
+        modelId: chain.modelId,
+        reasoningEffort: chain.reasoningEffort,
+      }),
       interactionWorkingDirectory: this.options.interactionWorkingDirectory,
       ...(chain.recoverySummary === null
         ? {}

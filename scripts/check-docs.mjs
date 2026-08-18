@@ -21,6 +21,30 @@ const STALE_USER_PHRASES = [
   "after the composed entrypoint exists",
   "integration owner must wire",
 ];
+const FORBIDDEN_PUBLIC_ONBOARDING_PHRASES = [
+  "Deployment setup code",
+  "reveal DASHBOARD_SETUP_SECRET",
+  "private code from your service environment",
+  "Choose an agent password",
+  "Enter the agent password",
+  "Create an agent password",
+  "Set an agent password",
+  "authenticated dashboard",
+  "dashboard authentication",
+];
+const REMOVED_MODEL_ENVIRONMENT_VARIABLES = [
+  "MODEL_FAST",
+  "MODEL_FAST_EFFORT",
+  "MODEL_MAIN",
+  "MODEL_MAIN_EFFORT",
+  "MODEL_BALANCED",
+  "MODEL_BALANCED_EFFORT",
+  "MODEL_HARD",
+  "MODEL_HARD_EFFORT",
+  "MODEL_DEEP",
+  "MODEL_DEEP_EFFORT",
+  "ALLOW_REASONING_FALLBACK",
+];
 
 function walkFiles(directory) {
   const files = [];
@@ -36,6 +60,15 @@ function walkFiles(directory) {
     }
   }
   return files;
+}
+
+function publicDocumentationFiles() {
+  return [
+    join(REPOSITORY_ROOT, "README.md"),
+    ...readdirSync(join(REPOSITORY_ROOT, "docs"), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && MARKDOWN_EXTENSIONS.has(extname(entry.name)))
+      .map((entry) => join(REPOSITORY_ROOT, "docs", entry.name)),
+  ];
 }
 
 function lineNumber(source, index) {
@@ -208,29 +241,73 @@ function publicEnvironmentVariables() {
   return [...variables].sort();
 }
 
-function environmentExampleFailures(publicVariables) {
+function environmentDocumentationFailures(publicVariables) {
   const example = readFileSync(join(REPOSITORY_ROOT, ".env.example"), "utf8");
-  const documented = new Set(
+  const configuration = readFileSync(
+    join(REPOSITORY_ROOT, "docs", "CONFIGURATION.md"),
+    "utf8",
+  );
+  const documentedInExample = new Set(
     [...example.matchAll(/^\s*#?\s*([A-Z][A-Z0-9_]+)=/gmu)].map((match) => match[1]),
   );
-  return publicVariables
-    .filter((variable) => !documented.has(variable))
-    .map((variable) => `.env.example is missing public environment variable ${variable}`);
+  const failures = [];
+  for (const variable of publicVariables) {
+    if (!documentedInExample.has(variable)) {
+      failures.push(`.env.example is missing active environment variable ${variable}`);
+    }
+    const variablePattern = new RegExp(
+      `(?:^|[^A-Z0-9_])${escapeRegularExpression(variable)}(?:$|[^A-Z0-9_])`,
+      "u",
+    );
+    if (!variablePattern.test(configuration)) {
+      failures.push(`docs/CONFIGURATION.md is missing active environment variable ${variable}`);
+    }
+  }
+  return failures;
 }
 
-function stalePhraseFailures() {
-  const files = [
-    join(REPOSITORY_ROOT, "README.md"),
-    ...readdirSync(join(REPOSITORY_ROOT, "docs"), { withFileTypes: true })
-      .filter((entry) => entry.isFile() && MARKDOWN_EXTENSIONS.has(extname(entry.name)))
-      .map((entry) => join(REPOSITORY_ROOT, "docs", entry.name)),
-  ];
+function removedModelVariableFailures(files) {
+  const failures = [];
+  for (const file of [join(REPOSITORY_ROOT, ".env.example"), ...files]) {
+    const source = readFileSync(file, "utf8");
+    for (const variable of REMOVED_MODEL_ENVIRONMENT_VARIABLES) {
+      const variablePattern = new RegExp(
+        `(?:^|[^A-Z0-9_])${escapeRegularExpression(variable)}(?:$|[^A-Z0-9_])`,
+        "u",
+      );
+      const match = variablePattern.exec(source);
+      if (match !== null) {
+        failures.push(`${relative(REPOSITORY_ROOT, file)}:${lineNumber(source, match.index)} documents removed model environment variable ${variable}`);
+      }
+    }
+    const familyMarker = source.indexOf("MODEL_*");
+    if (familyMarker !== -1) {
+      failures.push(`${relative(REPOSITORY_ROOT, file)}:${lineNumber(source, familyMarker)} documents the removed MODEL_* environment family`);
+    }
+  }
+  return failures;
+}
+
+function stalePhraseFailures(files) {
   const failures = [];
   for (const file of files) {
     const source = readFileSync(file, "utf8").toLowerCase();
     for (const phrase of STALE_USER_PHRASES) {
       if (source.includes(phrase.toLowerCase())) {
         failures.push(`${relative(REPOSITORY_ROOT, file)} contains stale phrase: ${phrase}`);
+      }
+    }
+  }
+  return failures;
+}
+
+function publicOnboardingFailures(files) {
+  const failures = [];
+  for (const file of files) {
+    const source = readFileSync(file, "utf8").toLowerCase();
+    for (const phrase of FORBIDDEN_PUBLIC_ONBOARDING_PHRASES) {
+      if (source.includes(phrase.toLowerCase())) {
+        failures.push(`${relative(REPOSITORY_ROOT, file)} contains forbidden public-onboarding phrase: ${phrase}`);
       }
     }
   }
@@ -259,13 +336,16 @@ export function runDocumentationChecks() {
   const manifest = packageManifest();
   const scripts = manifest.scripts ?? {};
   const publicVariables = publicEnvironmentVariables();
+  const publicDocumentation = publicDocumentationFiles();
   const failures = [
     ...localMarkdownLinkFailures(markdownFiles),
     ...documentedCommandFailures(markdownFiles, scripts),
     ...railwayCommandFailures(scripts),
     ...repositoryAndDeployButtonFailures(),
-    ...environmentExampleFailures(publicVariables),
-    ...stalePhraseFailures(),
+    ...environmentDocumentationFailures(publicVariables),
+    ...removedModelVariableFailures(markdownFiles),
+    ...stalePhraseFailures(publicDocumentation),
+    ...publicOnboardingFailures(publicDocumentation),
     ...llmsEntrypointFailures(),
   ];
   if (failures.length > 0) {

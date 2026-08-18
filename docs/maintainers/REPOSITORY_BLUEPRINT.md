@@ -86,7 +86,8 @@ imessage-codex-agent-boilerplate/
 │   │   ├── interaction-runtime.ts
 │   │   ├── execution-runtime.ts
 │   │   ├── thread-store.ts
-│   │   ├── model-router.ts
+│   │   ├── model-selection.ts
+│   │   ├── codex-account-capabilities.ts
 │   │   ├── prompt-builder.ts
 │   │   └── schemas.ts
 │   ├── memory/
@@ -125,9 +126,9 @@ imessage-codex-agent-boilerplate/
 |---|---|---|
 | Process boot | `src/index.ts` | Starts dependencies in order; owns shutdown |
 | Environment | `src/config/env.ts` | Validates all required and optional variables at startup |
-| Model profiles | `src/config/model-profiles.ts`, `src/agent/model-router.ts` | Converts profile to tested Codex model/effort/options |
+| Model selection | `src/agent/model-selection.ts`, `src/db/repositories/model-settings.ts` | Resolves account-visible preference/effective state and snapshots new chains |
 | Spectrum | `src/transport/*` | Uses native Spectrum concepts; never runs Codex inline |
-| Health | `src/http/*` | Liveness/readiness only; no public admin UI in v1 |
+| HTTP setup and health | `src/http/*` | Public setup dashboard, same-origin mutation checks, liveness, and detailed readiness |
 | Database | `src/db/*` | Schema, migrations, transaction boundaries, repositories |
 | Queue | `src/queue/*` | Job names, payload schemas, handlers, retry policy |
 | Codex | `src/agent/*` | Thread lifecycle, structured outputs, environment, aborts |
@@ -139,14 +140,33 @@ imessage-codex-agent-boilerplate/
 
 ## 3. Environment variables
 
-### Required in all modes
+### Required Railway infrastructure
 
 ```dotenv
-SPECTRUM_PROJECT_ID=
-SPECTRUM_PROJECT_SECRET=
 DATABASE_URL=
-AGENT_OWNER_HANDLES=+15551234567,user@example.com
-DEPLOYMENT_ID=
+NODE_ENV=production
+APP_ENCRYPTION_KEY=
+CODEX_HOME=/var/data/codex
+AGENT_WORKSPACE_ROOT=/var/data/workspaces
+CODEX_AUTH_MODE=chatgpt
+```
+
+New Railway installations derive the internal deployment identity from
+`RAILWAY_SERVICE_ID`. Migrated installations preserve their explicit
+`DEPLOYMENT_ID`. Railway injects its service, deployment, volume-mount, and
+port variables.
+
+### Dashboard-managed setup and migration inputs
+
+Fresh installations enter the owner phone and authenticate Photon in the
+public dashboard. Existing Spectrum credentials and owner variables remain
+optional overrides or one-time migration inputs:
+
+```dotenv
+# SPECTRUM_PROJECT_ID=
+# SPECTRUM_PROJECT_SECRET=
+# OWNER_PHONE_NUMBER=
+# AGENT_OWNER_HANDLES=
 ```
 
 ### Required for Supermemory-enabled mode
@@ -156,30 +176,17 @@ SUPERMEMORY_API_KEY=
 SUPERMEMORY_CONTAINER_PREFIX=imessage-agent
 ```
 
-### Codex authentication
+### Codex authentication override
 
 ```dotenv
-CODEX_HOME=/var/data/codex
-AGENT_WORKSPACE_ROOT=/var/data/workspaces
-CODEX_AUTH_MODE=chatgpt
 # OPENAI_API_KEY=        # used only when CODEX_AUTH_MODE=api_key
 ```
 
-### Model defaults
+### Model default
 
-```dotenv
-MODEL_FAST=gpt-5.6-luna
-MODEL_FAST_EFFORT=medium
-MODEL_MAIN=gpt-5.6-luna
-MODEL_MAIN_EFFORT=high
-MODEL_BALANCED=gpt-5.6-terra
-MODEL_BALANCED_EFFORT=high
-MODEL_HARD=gpt-5.6-luna
-MODEL_HARD_EFFORT=max
-MODEL_DEEP=gpt-5.6-sol
-MODEL_DEEP_EFFORT=max
-ALLOW_REASONING_FALLBACK=false
-```
+GPT-5.6 Luna / High is stored in PostgreSQL. In ChatGPT mode, the owner changes
+the deployment-wide preference under **Dashboard → Advanced** using the live
+Codex `model/list` catalog. There are no model environment variables.
 
 ### Behavior and limits
 
@@ -233,7 +240,6 @@ export interface AuthorizedInbound {
 
 export interface InteractionDecision {
   mode: "direct" | "delegate" | "confirm" | "silent";
-  modelProfile: "fast" | "main" | "balanced" | "hard" | "deep";
   userMessage?: string;
   statusMessage?: string;
   tasks: ExecutionTask[];
@@ -247,7 +253,6 @@ export interface ExecutionTask {
   purpose: string;
   instructions: string;
   workspaceBinding?: string;
-  modelProfile: string;
   permissionProfile: "read" | "workspace-write" | "network-read" | "approval-required";
   dependsOn: string[];
 }
@@ -272,7 +277,7 @@ All interfaces are backed by runtime schemas in `src/agent/schemas.ts` and `src/
 - `queue/handlers` compose modules and own state transitions.
 - `memory` may not authorize users or alter operational chain state.
 - `security` may not call the model.
-- `http` may read readiness state but may not mutate agent state in v1.
+- `http` owns exact owner, Photon, ChatGPT, and model-setting routes plus health/readiness; mutation routes enforce the same-origin boundary and call injected controllers rather than bypassing domain state.
 - Prompt files are loaded as versioned text and hashed into each run for auditability.
 
 ## 7. Migration from the original starter
@@ -280,7 +285,7 @@ All interfaces are backed by runtime schemas in `src/agent/schemas.ts` and `src/
 | Original | New boilerplate |
 |---|---|
 | `src/photon.ts` with inline hello reply | `src/transport/spectrum.ts` + durable receive loop |
-| `src/server.ts` mounts Spectrum webhook | `src/http/server.ts` exposes only health/readiness |
+| `src/server.ts` mounts Spectrum webhook | `src/http/server.ts` exposes the public setup dashboard plus health/readiness |
 | `@spectrum-ts/express` | Removed unless a future separate webhook integration needs it |
 | Three Spectrum variables including webhook secret | Project ID and project secret; no webhook secret for gRPC path |
 | Node 20 | Node 22.12+ because the selected queue/runtime stack requires it |

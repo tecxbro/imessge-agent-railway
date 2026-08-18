@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import { modelProfileNameSchema } from "../config/model-profiles.js";
 import { permissionProfileNameSchema } from "../security/permissions.js";
 import {
   ACTION_TYPES,
@@ -141,7 +140,6 @@ export const executionTaskSchema = z
     purpose: boundedTextSchema(500),
     instructions: boundedTextSchema(8_000),
     workspaceBinding: workspaceBindingSchema.nullable(),
-    modelProfile: modelProfileNameSchema,
     permissionProfile: permissionProfileNameSchema,
     dependsOn: z.array(taskIdentifierSchema).max(5),
   })
@@ -234,7 +232,6 @@ export const executionTaskGraphSchema = z
 export const interactionDecisionSchema = z
   .object({
     mode: z.enum(["direct", "delegate", "confirm", "silent"]),
-    modelProfile: modelProfileNameSchema,
     userMessage: boundedTextSchema(16_000).nullable(),
     statusMessage: boundedTextSchema(500).nullable(),
     tasks: executionTaskGraphSchema,

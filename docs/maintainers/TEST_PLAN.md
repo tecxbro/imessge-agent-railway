@@ -10,7 +10,7 @@ The dangerous bugs are not “the model gave an imperfect answer.” They are:
 - One user receives another user’s memory or response.
 - An unknown sender reaches Codex.
 - A model broadens its own permissions or approves its own action.
-- A restart loses ChatGPT auth, Codex context, routing, or send state.
+- A restart loses ChatGPT auth, Codex context, model preference, or send state.
 
 The test plan therefore treats models and providers as replaceable dependencies and verifies application invariants under failure. The executable production runtime is composed; clean-account Railway deployment and protected live-provider tests remain separate evidence gates.
 
@@ -18,7 +18,7 @@ The test plan therefore treats models and providers as replaceable dependencies 
 
 | Layer | Purpose | External dependencies |
 |---|---|---|
-| Unit | Pure parsers, schemas, routing, splitting, policies | None |
+| Unit | Pure parsers, schemas, model selection, splitting, policies | None |
 | Contract | Assert adapter behavior against captured provider/SDK fixtures | None during normal CI |
 | Integration | Real PostgreSQL/pg-boss plus fake Spectrum/Codex/Supermemory | Local containers/fakes |
 | End-to-end | Real Photon development project and authenticated Codex | Opt-in protected environment |
@@ -31,8 +31,8 @@ The test plan therefore treats models and providers as replaceable dependencies 
 ### Configuration
 
 - Missing required variables produce one actionable validation error.
-- Invalid owner handle, path, duration, model, or effort is rejected.
-- Production refuses unsupported fallback unless explicitly enabled.
+- Invalid owner handle, path, duration, boolean, or enum is rejected.
+- Removed legacy model-profile environment values are ignored safely.
 - Persistent paths must resolve beneath the Railway volume mount in production.
 
 ### Sender identity
@@ -51,13 +51,18 @@ The test plan therefore treats models and providers as replaceable dependencies 
 - `/new` resets thread, not owner memory.
 - Unknown command returns concise help and never reaches Codex.
 
-### Model routing
+### Account-aware model selection
 
-- Deterministic fixture classes.
-- User override persistence.
-- Escalation once, never infinite.
-- Profile and permission remain independent.
-- Unsupported model/effort diagnostics.
+- Luna High is preferred when the exact pair is advertised.
+- Missing effort/model resolves to the Codex-advertised default pair without
+  overwriting the preference.
+- Empty or malformed catalogs fail closed; every cursor is followed and hidden
+  models are not requested.
+- Account plan/catalog changes refresh state and logout clears it.
+- The model cannot choose a harness model through structured output.
+- Only the effective pair is probed; unsupported unused models do not fail
+  readiness.
+- `/model` is read-only and profile arguments do not mutate state.
 
 ### Prompt and schema
 
@@ -150,6 +155,15 @@ Use a disposable PostgreSQL database and real pg-boss.
 - Failed dependency blocks or changes downstream behavior according to policy.
 - One synthesis job is created after terminal states.
 - Partial success remains available.
+
+### Model settings and chain snapshots
+
+- Preference and plan metadata survive restart without startup resetting them.
+- Advanced accepts only an exact current catalog pair after one bounded probe.
+- Stale, unavailable, malformed, and rejected-pair cases return stable errors.
+- A running chain retains its model/effort snapshot after a preference change.
+- The next chain receives the new pair, and planning, all tasks, and synthesis
+  use that identical snapshot.
 
 ### Outbound recovery
 

@@ -347,15 +347,15 @@ describe("immutable code-backed approval protocol", () => {
       ),
     ).resolves.toMatchObject({
       handled: true,
-      response: expect.stringContaining("Only the active owner"),
+      response: expect.stringContaining("only the active owner"),
     });
     await expect(handler.handle(owner, spaceId, "yes")).resolves.toMatchObject({
       handled: true,
-      response: expect.stringContaining("More than one approval"),
+      response: expect.stringContaining("more than one approval"),
     });
     await expect(handler.handle(owner, spaceId, "/unknown")).resolves.toMatchObject({
       handled: true,
-      response: expect.stringContaining("Unknown command"),
+      response: expect.stringContaining("unknown command"),
     });
     await expect(handler.handle(owner, spaceId, "please continue")).resolves.toEqual({
       handled: false,

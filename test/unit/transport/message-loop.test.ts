@@ -29,6 +29,7 @@ function fakeMessage(
     id?: string;
     mentions?: readonly { address: string; start: number; length: number }[];
     platform?: string;
+    read?: Message["read"];
     sender?: unknown;
   } = {},
 ): Message {
@@ -38,6 +39,7 @@ function fakeMessage(
     id: overrides.id ?? "external-message-id",
     mentions: overrides.mentions,
     platform: overrides.platform ?? "imessage",
+    read: overrides.read ?? vi.fn(async () => undefined),
     sender:
       "sender" in overrides
         ? overrides.sender
@@ -60,12 +62,20 @@ function ingestion(
 }
 
 describe("Spectrum message handling", () => {
-  it("normalizes one inbound text event and hands it to authorization/ingestion", async () => {
-    const authorizeAndIngest = ingestion();
+  it("normalizes one inbound text event, ingests it, and then marks it read", async () => {
+    const sequence: string[] = [];
+    const authorizeAndIngest = ingestion(async () => {
+      sequence.push("ingested");
+      return "accepted";
+    });
     const space = fakeSpace();
+    const read = vi.fn(async () => {
+      sequence.push("read");
+    });
+    const message = fakeMessage(space, { read });
 
     await expect(
-      handleSpectrumMessage(space, fakeMessage(space), { authorizeAndIngest }),
+      handleSpectrumMessage(space, message, { authorizeAndIngest }),
     ).resolves.toBe("accepted");
 
     expect(authorizeAndIngest.authorizeAndIngest).toHaveBeenCalledTimes(1);
@@ -88,15 +98,52 @@ describe("Spectrum message handling", () => {
       },
       {},
     );
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(sequence).toEqual(["ingested", "read"]);
   });
 
-  it("treats a duplicate external message disposition as harmless", async () => {
+  it("marks a duplicate external message as read without re-ingesting it", async () => {
     const authorizeAndIngest = ingestion(async () => "duplicate");
     const space = fakeSpace();
+    const read = vi.fn(async () => undefined);
 
     await expect(
-      handleSpectrumMessage(space, fakeMessage(space), { authorizeAndIngest }),
+      handleSpectrumMessage(space, fakeMessage(space, { read }), {
+        authorizeAndIngest,
+      }),
     ).resolves.toBe("duplicate");
+
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark an unauthorized inbound message as read", async () => {
+    const authorizeAndIngest = ingestion(async () => "unauthorized");
+    const space = fakeSpace();
+    const read = vi.fn(async () => undefined);
+
+    await expect(
+      handleSpectrumMessage(space, fakeMessage(space, { read }), {
+        authorizeAndIngest,
+      }),
+    ).resolves.toBe("unauthorized");
+
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("does not mark a message read when durable ingestion fails", async () => {
+    const authorizeAndIngest = ingestion(async () => {
+      throw new Error("database unavailable");
+    });
+    const space = fakeSpace();
+    const read = vi.fn(async () => undefined);
+
+    await expect(
+      handleSpectrumMessage(space, fakeMessage(space, { read }), {
+        authorizeAndIngest,
+      }),
+    ).rejects.toThrow("database unavailable");
+
+    expect(read).not.toHaveBeenCalled();
   });
 
   it("preserves native mention and direct-reply evidence for deterministic group policy", async () => {
@@ -148,28 +195,32 @@ describe("Spectrum message handling", () => {
     const authorizeAndIngest = ingestion();
     const onIgnored = vi.fn();
     const space = fakeSpace();
+    const read = vi.fn(async () => undefined);
 
     await expect(
-      handleSpectrumMessage(space, fakeMessage(space, overrides), {
+      handleSpectrumMessage(space, fakeMessage(space, { ...overrides, read }), {
         authorizeAndIngest,
         onIgnored,
       }),
     ).resolves.toBe(expected);
 
     expect(authorizeAndIngest.authorizeAndIngest).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
     expect(onIgnored).toHaveBeenCalledWith(expected);
   });
 
   it("ignores a missing sender before authorization handoff", async () => {
     const authorizeAndIngest = ingestion();
     const space = fakeSpace();
+    const read = vi.fn(async () => undefined);
 
     await expect(
-      handleSpectrumMessage(space, fakeMessage(space, { sender: null }), {
+      handleSpectrumMessage(space, fakeMessage(space, { read, sender: null }), {
         authorizeAndIngest,
       }),
     ).resolves.toBe("invalid-sender");
     expect(authorizeAndIngest.authorizeAndIngest).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
   });
 });
 

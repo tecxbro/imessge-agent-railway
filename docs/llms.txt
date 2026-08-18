@@ -15,7 +15,7 @@
 - [Product requirements](./maintainers/PRD.md)
 - [Data model](./maintainers/DATA_MODEL.md)
 - [Repository blueprint](./maintainers/REPOSITORY_BLUEPRINT.md)
-- [Model routing](./maintainers/MODEL_ROUTING.md)
+- [Account-aware model selection](./maintainers/MODEL_ROUTING.md)
 - [Prompting and orchestration](./maintainers/PROMPTING_AND_ORCHESTRATION.md)
 - [Skills](./maintainers/SKILLS.md)
 - [Convex alternative](./maintainers/CONVEX_VARIANT.md)

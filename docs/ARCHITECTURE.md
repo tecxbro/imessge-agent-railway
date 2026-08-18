@@ -31,8 +31,12 @@ The remainder of this document describes the composition contract and identifies
 flowchart TB
   U["Authorized iMessage owner"] <--> P["Photon Spectrum Cloud"]
   P <-->|"persistent app.messages gRPC"| T["Spectrum receive loop"]
+  B["Public browser"]
 
   subgraph W["One Railway application service"]
+    L["Same-origin mutation boundary"]
+    L --> DSH["Public setup dashboard"]
+    DSH --> PS["Photon and ChatGPT setup controllers"]
     T --> A["authorize + durable ingest"]
     A --> Q["pg-boss workers"]
     Q --> I["interaction Codex runtime"]
@@ -49,6 +53,7 @@ flowchart TB
   I <--> CH[("CODEX_HOME")]
   E <--> CH
 
+  B --> L
   R["Railway health check"] --> H
 ```
 
@@ -86,6 +91,12 @@ These boundaries are non-interchangeable:
 - Unknown senders must be rejected before any model or child-process call.
 - Model, repository, memory, web, and tool content are untrusted data. A model cannot broaden its permission profile or approve an action.
 
+The HTTP setup surface is public. It has no password, operator session, or browser authentication state. Anyone who deliberately opens the service URL can view the setup dashboard and invoke setup actions. This is an accepted single-deployment limitation, not an identity boundary.
+
+State-changing setup requests require an exact same-origin `Origin` and reject cross-site fetch metadata. This reduces drive-by cross-site submissions but does not authenticate the browser. Public owner status and rendered pages contain only the masked owner phone; submitted raw numbers are never echoed. Provider credentials, database credentials, Codex credentials, and unrestricted errors stay server-side.
+
+`DeploymentIdentityController` can exist before PostgreSQL is connected. After migrations, `OperationalRepository.ensureDeployment()` creates the deployment and primary owner without a channel identity, then the controller binds to the repository. An active database identity wins; only when none exists may one valid legacy environment phone be imported. Stored Photon metadata is never an authorization source. The controller serializes replacements, exposes masked state, and notifies activation only after persistence succeeds.
+
 ## 4. Boot sequence
 
 The final composition boundary starts the HTTP listener first so the process can remain live while setup is incomplete.
@@ -96,6 +107,7 @@ sequenceDiagram
   participant H as Health server
   participant B as Bootstrap coordinator
   participant D as Volume and database
+  participant O as Owner identity
   participant C as Codex
   participant S as Spectrum
 
@@ -104,9 +116,10 @@ sequenceDiagram
   B->>B: validate configuration
   B->>D: prepare CODEX_HOME and workspaces
   B->>D: connect database and verify migrations
+  B->>O: ensure deployment and initialize owner
   B->>D: start pg-boss and reconciliation
-  B->>C: inspect auth and probe model/effort/sandbox
-  alt auth and capabilities ready
+  B->>C: refresh account catalog and probe effective pair
+  alt owner, auth, and capabilities ready
     B->>S: launch supervised gRPC receive loop
     S-->>B: connected
     H-->>R: /readyz = 200
@@ -119,18 +132,27 @@ sequenceDiagram
 The ordered startup stages in `startAgentService()` are:
 
 1. listen on HTTP;
-2. validate configuration;
+2. validate configuration, including rejection of removed dashboard credential keys;
 3. prepare the two persistent directories and Codex config;
 4. connect PostgreSQL;
 5. apply or verify migrations;
-6. start pg-boss;
-7. inspect Codex auth and probe configured capabilities;
-8. configure optional Supermemory; and
-9. start Spectrum only when Codex auth and capabilities are ready.
+6. ensure the deployment, bind the owner identity repository, and import one valid legacy owner only when no database identity exists;
+7. start pg-boss;
+8. refresh Codex account capabilities, resolve the effective model pair, and
+   probe only that pair;
+9. configure optional Supermemory; and
+10. start Spectrum only when owner identity, Photon, Codex auth, and capabilities are ready.
 
 The integration bootstrap must make `startSpectrum()` resolve after supervision has been launched and connection state can be tracked; it must not block bootstrap completion for the lifetime of the stream. It must also run durable-pipeline reconciliation before accepting normal work.
 
-Missing or expired ChatGPT auth is a setup state, not a crash loop. Liveness remains healthy, readiness stays false, and Spectrum execution is not started. In ChatGPT mode the operator runs `npm run codex:login` and `npm run codex:status` using the same persistent `CODEX_HOME`, then restarts. In API-key mode readiness requires `OPENAI_API_KEY`; the key is copied only into the explicit Codex child environment.
+Missing or expired ChatGPT auth is a setup state, not a crash loop. Liveness remains healthy, readiness stays false, and Spectrum execution is not started. In ChatGPT mode the user reconnects through the public dashboard device-code flow; `npm run codex:login` and `npm run codex:status` in the private service shell remain recovery tools using the same persistent `CODEX_HOME`. In API-key mode readiness requires `OPENAI_API_KEY`; the key is copied only into the explicit Codex child environment.
+
+ChatGPT account `model/list` is the authority for the Advanced picker and
+supported reasoning efforts; `account/read` and `account/updated` supply only
+displayed plan metadata. PostgreSQL stores GPT-5.6 Luna / High as the default
+preference separately from the effective pair. If the exact preference is not
+advertised, Codex's advertised default model and effort become effective
+without overwriting the preference.
 
 ## 5. Message pipeline
 
@@ -159,7 +181,7 @@ If queue scheduling fails after insert, the message remains durable. Reconciliat
 
 ### 5.3 Flush
 
-The flush transaction drains undrained and carried messages in order, creates a versioned chain, cancels the stale chain, and enqueues one `turn.plan` job. Queue payloads contain identifiers and expected versions/states, not raw personal content.
+The flush transaction drains undrained and carried messages in order, creates a versioned chain with the deployment's current effective model/effort snapshot, cancels the stale chain, and enqueues one `turn.plan` job. Queue payloads contain identifiers and expected versions/states, not raw personal content. A later dashboard change affects the next chain and cannot change running work.
 
 ### 5.4 Plan
 
@@ -168,21 +190,34 @@ The `turn.plan` handler:
 1. verify the chain ID, version, and current state;
 2. load authoritative history from PostgreSQL;
 3. optionally recall bounded, owner-scoped Supermemory context;
-4. resolve an exact model/effort profile;
+4. load the exact model/effort snapshot from the chain;
 5. run the interaction Codex thread with structured output; and
 6. either materialize a direct response or enqueue bounded execution tasks.
 
-The production composition registers this handler with its model profiles, prompt bundle, durable repositories, queue publisher, optional memory recall, and outbound status transport. Offline tests cover those boundaries; protected live-provider execution remains a separate release check.
+The production composition registers this handler with its prompt bundle,
+durable repositories, queue publisher, optional memory recall, and outbound
+status transport. The interaction model cannot select a harness model through
+structured output. Offline tests cover those boundaries; protected
+live-provider execution remains a separate release check.
 
 ### 5.5 Execute
 
 Each `task.execute` handler re-checks chain/task state and current workspace capability, resolves a named thread and explicit workspace, creates a minimal child environment, applies a code-owned permission profile, runs with timeout/cancellation/output bounds, validates `ExecutionResult`, and persists a terminal task result or exact approval proposal.
 
-Execution agents cannot message the owner or consume their own approval. Their results return through synthesis. The production composition registers the durable execution worker with bounded concurrency, cancellation, model routing, prompts, and the shared orchestration repository.
+Execution agents cannot message the owner or consume their own approval. Their
+results return through synthesis. Every task loads the parent chain's persisted
+model pair; there is no task-complexity router or automatic escalation. The
+production composition registers the durable execution worker with bounded
+concurrency, cancellation, prompts, and the shared orchestration repository.
 
 ### 5.6 Synthesize
 
-The singleton `turn.synthesize` handler loads terminal task results, preserves truthful partial failures, requires confirmation for consequential operations, produces the final user-facing response, and materializes every outbound part before sending. The production composition registers this worker and the outbound sender against the same durable repository and queue.
+The singleton `turn.synthesize` handler loads terminal task results and the same
+chain model pair, preserves truthful partial failures, requires confirmation
+for consequential operations, produces the final user-facing response, and
+materializes every outbound part before sending. The production composition
+registers this worker and the outbound sender against the same durable
+repository and queue.
 
 ### 5.7 Send
 
@@ -224,7 +259,10 @@ Handlers compare their expected version and state with the authoritative row. A 
 
 The interaction lane owns concise user-facing answers, decomposition, status wording, approvals, and final synthesis. Its default permissions are read-only with network disabled.
 
-Execution lanes receive one bounded purpose, one explicit workspace, a model profile, a permission profile, runtime/output limits, and only relevant context. Independent tasks may run concurrently within the configured global limit; dependent tasks form a validated DAG.
+Execution lanes receive one bounded purpose, one explicit workspace, the
+chain's code-owned model selection, a permission profile, runtime/output
+limits, and only relevant context. Independent tasks may run concurrently
+within the configured global limit; dependent tasks form a validated DAG.
 
 The Codex child environment is constructed from an allowlist. It excludes database, Photon, Supermemory, encryption, and unrelated cloud credentials. `OPENAI_API_KEY` is included only in explicit API-key mode. `danger-full-access` is forbidden.
 
@@ -235,42 +273,33 @@ Consequential actions use immutable approval data bound to owner, allowed space,
 The composed health server returns:
 
 ```text
-GET /          -> 200 operator setup/readiness page; never the iMessage conversation
-GET /healthz  -> 200 {"status":"ok"}
-GET /readyz   -> 200 only when every critical component is ready
-GET /readyz   -> 503 with redacted component states and safe actions otherwise
+GET /          -> public setup entry point; never the iMessage conversation
+GET /healthz  -> public 200 {"status":"ok"}
+GET /readyz   -> public detailed readiness snapshot; 200 only when critical components are ready
+GET /readyz   -> public detailed readiness snapshot with 503 otherwise
 ```
 
-Critical readiness components are configuration, database, migrations, queue, Spectrum, Codex auth, Codex capabilities, persistent storage (`disk` in the readiness contract), and workspace. Supermemory may be `disabled` or degraded without making operational readiness depend on semantic storage.
+Critical readiness components are configuration, database, migrations, queue, owner identity, Spectrum, Codex auth, Codex capabilities, disk, and workspace. Supermemory may be `disabled` or degraded without making operational readiness depend on semantic storage. Public `/readyz` reports the detailed component snapshot, bounded error codes, and remediation actions.
 
-Example setup response:
+Device codes, verification URLs, assigned numbers, masked owner state, bounded provider error codes, and detailed readiness are public through the dashboard and setup routes. Raw owner phone values, provider credentials, database credentials, message content, unrestricted errors, and private paths stay server-side. Railway uses `/healthz` to avoid turning incomplete enrollment into a restart loop.
 
-```json
-{
-  "status": "not_ready",
-  "ready": false,
-  "shuttingDown": false,
-  "components": {
-    "configuration": { "state": "ok" },
-    "database": { "state": "ok" },
-    "migrations": { "state": "ok" },
-    "queue": { "state": "ok" },
-    "spectrum": { "state": "missing" },
-    "codexAuth": { "state": "missing", "code": "CODEX_AUTH_MISSING" },
-    "codexCapabilities": { "state": "unknown" },
-    "disk": { "state": "ok" },
-    "workspace": { "state": "ok" },
-    "supermemory": { "state": "disabled" }
-  },
-  "actions": [
-    "Run npm run codex:login in the private service shell, verify with npm run codex:status, then restart the service."
-  ]
-}
-```
+The current `src/server.ts` starts this health server first, runs each operational stage, and shuts the composition down on process signals. Its `/healthz` proves only that the HTTP process is alive; `/readyz` becomes `200` only after the owner, PostgreSQL, migrations, queue, Codex auth/capabilities, storage, and Spectrum are ready. A fresh deployment without an owner is deliberately live but not ready, and Spectrum intake remains stopped.
 
-Raw provider errors, credentials, handles, message content, and unrestricted paths never enter readiness. The root operator page renders only this redacted state and safe setup actions. Railway uses `/healthz` to avoid turning incomplete private enrollment into a restart loop. Operators use `/readyz` as the acceptance gate.
+### 8.1 Public route boundary
 
-The current `src/server.ts` starts this health server first, runs each operational stage, and shuts the composition down on process signals. Its `/healthz` proves only that the HTTP process is alive; `/readyz` becomes `200` only after PostgreSQL, migrations, queue, Codex auth/capabilities, storage, and Spectrum are ready.
+| Route | Boundary |
+|---|---|
+| `GET /`, `GET /healthz`, `GET /agent/photon-logo.png` | Public |
+| `GET /readyz` | Public detailed readiness snapshot |
+| `GET /agent/dashboard`, `GET /agent/dashboard.js` | Public setup UI |
+| Photon status, ChatGPT status | Public setup status, including device-flow values when active |
+| `GET /api/setup/owner/status` | Public; masked owner only |
+| `POST /api/setup/owner` | Same-origin and fetch-metadata checks; exact size-limited country-aware JSON normalized server-side to E.164, plus the legacy exact E.164 shape |
+| Photon setup start, ChatGPT setup start | Same-origin and fetch-metadata checks; exact empty JSON object |
+| `GET /api/settings/model` | Public plan and picker metadata; private `no-store`; never returns email |
+| `PUT /api/settings/model` | Same-origin and fetch-metadata checks; exact model/effort JSON; server refresh and bounded probe |
+
+The server rejects unexpected JSON fields at route boundaries. Same-origin checks reduce drive-by requests but do not prove authorization. Device-code values are excluded from logs.
 
 ## 9. Failure and recovery contract
 
@@ -322,7 +351,7 @@ On `SIGTERM` or `SIGINT` the coordinator:
 7. closes PostgreSQL; and
 8. closes the health listener last.
 
-Each hook has a timeout. Cleanup continues after a hook fails, and results contain bounded failure codes rather than raw exception text. A critical failure sets a nonzero exit status.
+Each shutdown hook has a timeout. Cleanup continues after a hook fails, and results contain bounded failure codes rather than raw exception text. A critical failure sets a nonzero exit status.
 
 ## 11. Extension points
 

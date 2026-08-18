@@ -8,7 +8,7 @@ import type {
   ExecutionResult,
   InteractionDecision,
 } from "../../src/agent/schemas.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
+import { DEFAULT_MODEL_SELECTION } from "../../src/agent/model-selection.js";
 import { loadPromptBundle } from "../../src/config/prompt-bundle.js";
 import {
   createTurnSynthesizeHandler,
@@ -64,7 +64,7 @@ function synthesisContext(): TurnSynthesisContext {
     conversationHistory: [],
     priorStatusMessage: "I’m checking both paths now.",
     terminalResults: [successfulResult, failedResult],
-    selectedModelProfile: "main",
+    modelSelection: DEFAULT_MODEL_SELECTION,
     interactionWorkingDirectory: "/tmp",
   };
 }
@@ -100,7 +100,6 @@ describe("Step 5 final synthesis handler", () => {
         );
         return runtimeResult({
           mode: "direct",
-          modelProfile: "main",
           userMessage: "The persisted cursor is correct.",
           statusMessage: null,
           tasks: [],
@@ -116,7 +115,6 @@ describe("Step 5 final synthesis handler", () => {
       repository,
       interaction,
       publisher,
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
       encrypt: (plaintext) => `encrypted:${plaintext}`,
     });
@@ -124,17 +122,22 @@ describe("Step 5 final synthesis handler", () => {
     await handler(payload);
 
     expect(interaction.run).toHaveBeenCalledTimes(1);
+    expect(interaction.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelProfile: { model: "gpt-5.6-luna", effort: "high" },
+      }),
+    );
     expect(repository.commitFinal).toHaveBeenCalledWith(
       expect.objectContaining({
         decision: expect.objectContaining({
           mode: "direct",
           userMessage: expect.stringMatching(
-            /^Some requested work couldn’t be completed\./,
+            /^part of that didn’t finish\./,
           ),
         }),
         encryptedParts: [
           expect.stringMatching(
-            /^encrypted:Some requested work couldn’t be completed\./,
+            /^encrypted:part of that didn’t finish\./,
           ),
         ],
       }),
@@ -154,7 +157,6 @@ describe("Step 5 final synthesis handler", () => {
       run: vi.fn(async () =>
         runtimeResult({
           mode: "delegate",
-          modelProfile: "main",
           userMessage: null,
           statusMessage: null,
           tasks: [
@@ -164,7 +166,6 @@ describe("Step 5 final synthesis handler", () => {
               purpose: "Start another execution loop.",
               instructions: "Do more work.",
               workspaceBinding: "primary-repo",
-              modelProfile: "main",
               permissionProfile: "read",
               dependsOn: [],
             },
@@ -181,7 +182,6 @@ describe("Step 5 final synthesis handler", () => {
       repository,
       interaction,
       publisher,
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
       encrypt: (plaintext) => plaintext,
     });

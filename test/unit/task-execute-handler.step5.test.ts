@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { executionResultSchema, executionTaskSchema } from "../../src/agent/schemas.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
+import { DEFAULT_MODEL_SELECTION } from "../../src/agent/model-selection.js";
 import { loadPromptBundle } from "../../src/config/prompt-bundle.js";
 import { createTaskExecuteHandler } from "../../src/queue/handlers/task-execute.js";
 
@@ -22,7 +22,6 @@ describe("Step 5 task execution handler", () => {
       purpose: "Inspect the bounded runtime path.",
       instructions: "Return evidence for the runtime path.",
       workspaceBinding: "primary-repo",
-      modelProfile: "main",
       permissionProfile: "read",
       dependsOn: [],
     });
@@ -57,6 +56,7 @@ describe("Step 5 task execution handler", () => {
         claimTask: async () => ({
           ownerId: "40000000-0000-4000-8000-000000000005",
           task,
+          modelSelection: DEFAULT_MODEL_SELECTION,
           maximumPermissionProfile: "read",
           workspaceRoot: "/tmp/workspaces",
           relevantContext: [],
@@ -66,13 +66,17 @@ describe("Step 5 task execution handler", () => {
       },
       execution: { run: executionRun },
       publisher: { enqueueTaskExecute, enqueueTurnSynthesize },
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
     });
 
     await handler(payload);
 
     expect(executionRun).toHaveBeenCalledTimes(1);
+    expect(executionRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelProfile: { model: "gpt-5.6-luna", effort: "high" },
+      }),
+    );
     expect(executionRun.mock.calls[0]?.[0]).not.toHaveProperty("onProgress");
     expect(completeTask).toHaveBeenCalledWith(
       expect.objectContaining({ payload, result }),
@@ -88,7 +92,6 @@ describe("Step 5 task execution handler", () => {
       purpose: "Finish the bounded check.",
       instructions: "Return the final evidence.",
       workspaceBinding: "primary-repo",
-      modelProfile: "main",
       permissionProfile: "read",
       dependsOn: [],
     });
@@ -111,6 +114,7 @@ describe("Step 5 task execution handler", () => {
         claimTask: async () => ({
           ownerId: "40000000-0000-4000-8000-000000000005",
           task,
+          modelSelection: DEFAULT_MODEL_SELECTION,
           maximumPermissionProfile: "read",
           workspaceRoot: "/tmp/workspaces",
           relevantContext: [],
@@ -134,7 +138,6 @@ describe("Step 5 task execution handler", () => {
         enqueueTaskExecute: vi.fn(),
         enqueueTurnSynthesize,
       },
-      modelProfiles: DEFAULT_MODEL_PROFILES,
       promptBundle: await loadPromptBundle(),
     });
 

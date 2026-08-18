@@ -50,21 +50,19 @@ describe("Step 5 prompt-injection fixtures", () => {
           {
             workspaceBinding: "primary-repo",
             permissionProfiles: ["read"],
-            modelProfiles: ["main"],
           },
         ]),
       ).toThrow(/permission profile.*does not allow/i);
     },
   );
 
-  it("rejects a disallowed workspace or model even when every enum is valid", () => {
+  it("rejects a disallowed workspace and keeps model selection out of task output", () => {
     const base = executionTaskSchema.parse({
       id: "inspect",
       agentName: "runtime-debugger",
       purpose: "Inspect bounded evidence.",
       instructions: "Return a read-only finding.",
       workspaceBinding: "primary-repo",
-      modelProfile: "main",
       permissionProfile: "read",
       dependsOn: [],
     });
@@ -72,7 +70,6 @@ describe("Step 5 prompt-injection fixtures", () => {
       {
         workspaceBinding: "primary-repo",
         permissionProfiles: ["read" as const],
-        modelProfiles: ["main" as const],
       },
     ];
 
@@ -82,12 +79,9 @@ describe("Step 5 prompt-injection fixtures", () => {
         capabilities,
       ),
     ).toThrow(/unavailable workspace binding/i);
-    expect(() =>
-      assertExecutionTasksAuthorized(
-        [{ ...base, modelProfile: "deep" }],
-        capabilities,
-      ),
-    ).toThrow(/outside the configured allowlist/i);
+    expect(
+      executionTaskSchema.safeParse({ ...base, modelProfile: "deep" }).success,
+    ).toBe(false);
     expect(() => assertExecutionTasksAuthorized([base], capabilities)).not.toThrow();
   });
 

@@ -2,6 +2,8 @@ import { Buffer } from "node:buffer";
 
 import { z } from "zod";
 
+import type { DeploymentIdentityController } from "../runtime/deployment-identity.js";
+
 const PHOTON_DASHBOARD_HOST = "https://app.photon.codes";
 const PHOTON_SPECTRUM_HOST = "https://spectrum.photon.codes";
 const PHOTON_CLIENT_ID = "photon-cli";
@@ -101,7 +103,10 @@ export class PhotonSetupError extends Error {
 }
 
 interface PhotonSetupServiceOptions {
-  ownerPhoneNumber?: string;
+  ownerIdentity: Pick<
+    DeploymentIdentityController,
+    "readOwnerPhoneNumber"
+  >;
   credentialsStore: PhotonSetupCredentialsStore;
   storedCredentials?: {
     assignedIMessageNumber: string;
@@ -192,7 +197,10 @@ function tokenCandidates(
 }
 
 export class PhotonSetupService implements PhotonSetupController {
-  readonly #ownerPhoneNumber: string | undefined;
+  readonly #ownerIdentity: Pick<
+    DeploymentIdentityController,
+    "readOwnerPhoneNumber"
+  >;
   readonly #credentialsStore: PhotonSetupCredentialsStore;
   readonly #fetch: typeof fetch;
   readonly #sleep: (milliseconds: number) => Promise<void>;
@@ -201,7 +209,7 @@ export class PhotonSetupService implements PhotonSetupController {
   #starting: Promise<PhotonSetupStatus> | undefined;
 
   public constructor(options: PhotonSetupServiceOptions) {
-    this.#ownerPhoneNumber = options.ownerPhoneNumber;
+    this.#ownerIdentity = options.ownerIdentity;
     this.#credentialsStore = options.credentialsStore;
     this.#fetch = options.fetchImplementation ?? fetch;
     this.#sleep = options.sleep ?? defaultSleep;
@@ -233,7 +241,9 @@ export class PhotonSetupService implements PhotonSetupController {
     ) {
       return this.status();
     }
-    if (this.#ownerPhoneNumber === undefined) {
+    const ownerPhoneNumber =
+      await this.#ownerIdentity.readOwnerPhoneNumber();
+    if (ownerPhoneNumber === undefined) {
       this.#status = {
         state: "failed",
         code: "PHOTON_OWNER_PHONE_REQUIRED",
@@ -244,7 +254,7 @@ export class PhotonSetupService implements PhotonSetupController {
       return await this.#starting;
     }
 
-    this.#starting = this.#beginDeviceLogin();
+    this.#starting = this.#beginDeviceLogin(ownerPhoneNumber);
     try {
       return await this.#starting;
     } finally {
@@ -252,7 +262,9 @@ export class PhotonSetupService implements PhotonSetupController {
     }
   }
 
-  async #beginDeviceLogin(): Promise<PhotonSetupStatus> {
+  async #beginDeviceLogin(
+    ownerPhoneNumber: string,
+  ): Promise<PhotonSetupStatus> {
     try {
       const response = await this.#fetch(
         `${PHOTON_DASHBOARD_HOST}/api/auth/device/code`,
@@ -279,7 +291,7 @@ export class PhotonSetupService implements PhotonSetupController {
           code.verification_uri_complete ?? code.verification_uri,
         expiresAt: new Date(Date.now() + expiresIn * 1_000).toISOString(),
       };
-      void this.#completeSetup(code).catch((error: unknown) => {
+      void this.#completeSetup(code, ownerPhoneNumber).catch((error: unknown) => {
         this.#status = {
           state: "failed",
           code:
@@ -301,6 +313,7 @@ export class PhotonSetupService implements PhotonSetupController {
 
   async #completeSetup(
     code: z.infer<typeof deviceCodeSchema>,
+    ownerPhoneNumber: string,
   ): Promise<void> {
     const token = await this.#pollForToken(code);
     this.#status = { state: "provisioning" };
@@ -336,7 +349,7 @@ export class PhotonSetupService implements PhotonSetupController {
       assignedPhoneNumber = await this.#registerOwnerAndReadAssignedNumber(
         projectId,
         projectSecret,
-        this.#ownerPhoneNumber!,
+        ownerPhoneNumber,
       );
     } catch (error) {
       if (
@@ -352,7 +365,7 @@ export class PhotonSetupService implements PhotonSetupController {
       photonDeviceBearerToken: token,
       photonProjectId: projectId,
       spectrumProjectSecret: projectSecret,
-      ownerPhoneNumber: this.#ownerPhoneNumber,
+      ownerPhoneNumber,
       assignedIMessageNumber: assignedPhoneNumber,
     });
     try {

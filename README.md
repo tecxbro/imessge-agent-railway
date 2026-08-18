@@ -2,7 +2,7 @@
 
 Deploy a private iMessage agent powered by Photon Spectrum, Codex, PostgreSQL, and optional Supermemory.
 
-The canonical repository is [`tecxbro/imessge-agent-railway`](https://github.com/tecxbro/imessge-agent-railway). The Railway service URL is an operator setup/status page; conversations happen through iMessage.
+The canonical repository is [`tecxbro/imessge-agent-railway`](https://github.com/tecxbro/imessge-agent-railway). The Railway service URL opens the public setup dashboard; conversations happen through iMessage.
 
 ## Before you deploy
 
@@ -10,7 +10,7 @@ You need:
 
 - a Railway account;
 - a Photon account for Spectrum Cloud iMessage setup;
-- the owner's E.164 phone number allowed to message the agent;
+- the owner's personal phone number allowed to message the agent;
 - either a ChatGPT account with Codex device login enabled or an OpenAI API key; and
 - an optional Supermemory API key if you want semantic memory.
 
@@ -21,14 +21,24 @@ The production shape uses one Railway application service, one PostgreSQL 18 ser
 1. Create a Railway project and add a PostgreSQL 18 service.
 2. Add an application service from this repository, select branch `main`, and configure `/railway.json` as its Railway config file.
 3. Attach one volume to the application service at `/var/data` and keep the service at one replica.
-4. Set `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `NODE_ENV=production`, `CODEX_HOME=/var/data/codex`, `AGENT_WORKSPACE_ROOT=/var/data/workspaces`, and `OWNER_PHONE_NUMBER` to the owner's E.164 number.
+4. Set `DATABASE_URL=${{Postgres.DATABASE_URL}}`, `NODE_ENV=production`, `CODEX_HOME=/var/data/codex`, and `AGENT_WORKSPACE_ROOT=/var/data/workspaces`.
 5. Generate `APP_ENCRYPTION_KEY` with `openssl rand -base64 32` and store it as a Railway service variable. Existing installations must preserve both this key and their explicit `DEPLOYMENT_ID`; a new installation may derive its stable internal ID from Railway's `RAILWAY_SERVICE_ID`.
 6. Choose `CODEX_AUTH_MODE=chatgpt` or `CODEX_AUTH_MODE=api_key`. For API-key mode, add `OPENAI_API_KEY` as a private Railway service variable.
 7. Enable **Wait for CI** before enabling GitHub automatic deployments from `main`, deploy, and wait for the build, pre-deploy migration, start, and `/healthz` check to finish.
-8. Open the application URL, authenticate Photon, then connect ChatGPT from the agent dashboard.
-9. Confirm `/readyz` returns HTTP 200, then message the agent from the authorized iMessage handle.
+8. Open the public dashboard at the application URL, enter the owner's phone number, authenticate Photon, then connect ChatGPT when using ChatGPT mode.
+9. After ChatGPT connects, open **Advanced** and confirm or change the deployment model and reasoning effort.
+10. Confirm `/readyz` returns HTTP 200.
+11. Text the Photon-assigned number shown at completion from the configured owner phone.
 
 Railway provides `PORT`, `RAILWAY_SERVICE_ID`, `RAILWAY_DEPLOYMENT_ID`, and `RAILWAY_VOLUME_MOUNT_PATH` at runtime. Do not define fake local values for those platform inputs.
+
+## Public dashboard and owner setup
+
+The setup dashboard is public. Anyone who can reach the service URL can view its setup status, device codes, masked owner status, assigned Photon number, and detailed readiness, and can attempt setup changes. Use the URL only while you accept that exposure; add an external access-control layer before using this template where public setup is unacceptable.
+
+Dashboard mutations still require a same-origin browser request and reject cross-site fetch metadata. That prevents ordinary drive-by cross-site submissions, but it is not authentication: a person who deliberately opens the public dashboard can change setup.
+
+The dashboard collects the owner's phone number before Photon setup. U.S. entry is the default, so the owner can type a normal 10-digit number without `+1`; **Not in the U.S.?** reveals a country selector, and international users may enter a national or complete international number. The server validates the selected country and normalizes the value to E.164 before storage. The phone number is configured in the dashboard rather than required in the environment. It is encrypted and fingerprinted in PostgreSQL, becomes the only iMessage sender authorized to use the agent, and is registered during Photon owner provisioning. The different Photon-assigned number shown at completion is the destination the owner texts. Replacing the owner number in the dashboard revokes the previous owner identity before the new identity can authorize messages.
 
 ## Finish Codex authentication
 
@@ -37,13 +47,20 @@ Railway provides `PORT`, `RAILWAY_SERVICE_ID`, `RAILWAY_DEPLOYMENT_ID`, and `RAI
 The default `CODEX_AUTH_MODE` is `chatgpt`.
 
 1. Open the deployed application URL in a trusted browser.
-2. Finish Photon setup first, then select **Connect ChatGPT**.
+2. Save the owner phone and finish Photon setup first, then select **Connect ChatGPT**.
 3. Open the displayed device-auth URL, sign in, and enter the one-time code.
 4. Keep the dashboard open while it verifies the login and prepares Codex. The dashboard advances automatically when each stage is ready.
 
+After ChatGPT connects, **Advanced** displays the account plan and only the
+models and reasoning efforts advertised by Codex for that account. The stored
+deployment default is GPT-5.6 Luna with High reasoning. If that exact pair is
+unavailable, the agent uses Codex's advertised default pair without changing
+the stored preference, and Advanced explains the fallback. Saved changes apply
+to new message chains; running work keeps its chain snapshot.
+
 ChatGPT credentials persist under `/var/data/codex`. Treat `auth.json` like a password: never print it, copy it into a ticket, or commit it.
 
-If dashboard authentication needs operator recovery, open a private `railway ssh` session and run `npm run codex:login`, then `npm run codex:status` before restarting the service.
+If ChatGPT authentication needs operator recovery, open a private `railway ssh` session and run `npm run codex:login`, then `npm run codex:status` before restarting the service.
 
 ### OpenAI API key
 
@@ -66,10 +83,10 @@ curl --silent --show-error "https://<service-host>/readyz"
 ```
 
 - `/healthz` returning 200 means the HTTP process is alive.
-- `/readyz` returning 200 means critical storage, PostgreSQL, migration, queue, Codex, and Spectrum checks are ready.
-- `/readyz` returning 503 means setup is incomplete or a dependency is degraded. Its response contains redacted component states and safe next actions.
+- `/readyz` returning 200 means owner identity, critical storage, PostgreSQL, migration, queue, Codex, and Spectrum checks are ready.
+- `/readyz` returning 503 means setup is incomplete or a dependency is degraded. Its public response includes the detailed component snapshot and remediation actions.
 
-The root URL is an operator setup/status page, not an iMessage chat link. It must never display credentials, message content, provider errors, database URLs, or private filesystem paths.
+The root URL is a public setup entry point, not an iMessage chat. Provider setup status, device codes, verification URLs, the assigned number, masked owner information, detailed readiness, and bounded provider error codes are public there. Raw owner phone values, provider access tokens, project secrets, Codex credentials, database credentials, and unrestricted provider errors remain server-side.
 
 ## Send the first iMessage
 
@@ -107,8 +124,8 @@ The most common edits are:
 | Personality and conversational style | `prompts/interaction.system.md`, `prompts/voice-policy.md` |
 | Execution behavior | `prompts/execution.system.md` |
 | Approval rules | `prompts/approval-policy.md` |
-| Models and reasoning effort | `.env` model variables |
-| Authorized sender | `OWNER_PHONE_NUMBER` (`AGENT_OWNER_HANDLES` remains a legacy fallback) |
+| Models and reasoning effort | **Advanced** in the deployment dashboard |
+| Authorized sender | **Change phone number** in the public dashboard; owner environment values are migration inputs only |
 | Semantic memory | `SUPERMEMORY_API_KEY` |
 | Railway build and deploy behavior | `railway.json` |
 | Service, database, volume, variables, and networking | Railway project settings |
@@ -137,7 +154,7 @@ npm run repo:setup-guards
 cp .env.example .env
 ```
 
-Edit `.env`, then generate the required encryption key:
+Edit `.env`, then generate an `APP_ENCRYPTION_KEY`:
 
 ```bash
 openssl rand -base64 32
@@ -197,6 +214,7 @@ PostgreSQL is the operational source of truth. Supermemory stores only bounded, 
 ## Security and privacy
 
 - Unknown senders are rejected before persistence, queueing, or model work.
+- The setup dashboard is public. Same-origin checks reduce drive-by cross-site mutations but do not authenticate visitors.
 - Authorization is checked again immediately before Codex or another child process starts.
 - Codex children receive an explicit environment allowlist, never the full server environment.
 - Models cannot approve actions or broaden code-owned permission profiles.

@@ -16,6 +16,21 @@ function expectWellFormedUtf16(value: string): void {
 }
 
 describe("Step 5 iMessage bubble splitting", () => {
+  it("treats 150 characters as model guidance rather than a transport limit", () => {
+    const original =
+      "Seedance did not generate the website. Seedance generated several pre-rendered films. The browser turns scrolling into a video-editing timeline, while the typography, buttons, navigation, grids, cards, and forms remain real frontend code.";
+    const intended = [
+      "Seedance didn’t generate the website. It generated several pre-rendered films.",
+      "The browser turns scrolling into a video-editing timeline.",
+      "The typography, buttons, navigation, grids, cards, and forms remain real frontend code.",
+    ];
+
+    expect(original.length).toBeGreaterThan(150);
+    expect(splitMessageBubbles(original)).toEqual([original]);
+    expect(splitMessageBubbles(intended.join("\n\n"))).toEqual(intended);
+    expect(intended.every((bubble) => bubble.length <= 150)).toBe(true);
+  });
+
   it("splits at paragraph boundaries without empty bubbles", () => {
     const input = [
       "The transport finding is confirmed.",

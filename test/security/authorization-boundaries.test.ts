@@ -16,10 +16,16 @@ const deploymentId = "00000000-0000-4000-8000-000000000001";
 const ownerId = "00000000-0000-4000-8000-000000000002";
 const ownerIdentityId = "00000000-0000-4000-8000-000000000003";
 const collaboratorIdentityId = "00000000-0000-4000-8000-000000000004";
+const replacementOwnerIdentityId = "00000000-0000-4000-8000-000000000005";
 const fingerprintKey = "sender-fingerprint-key-material-32-bytes-minimum";
 
 class MutableDirectory implements AuthorizationDirectory {
   public readonly identities = new Map<string, AuthorizationIdentity>();
+  public readonly handles = new Map([
+    [ownerIdentityId, "owner@example.com"],
+    [collaboratorIdentityId, "collaborator@example.com"],
+    [replacementOwnerIdentityId, "new-owner@example.com"],
+  ]);
 
   public async findByFingerprint(
     requestedDeploymentId: string,
@@ -30,9 +36,7 @@ class MutableDirectory implements AuthorizationDirectory {
         identity.deploymentId === requestedDeploymentId &&
         fingerprintSenderHandle(
           requestedDeploymentId,
-          identity.identityId === ownerIdentityId
-            ? "owner@example.com"
-            : "collaborator@example.com",
+          this.handles.get(identity.identityId)!,
           fingerprintKey,
         ) === handleFingerprint,
     );
@@ -145,6 +149,32 @@ describe("deterministic sender and process-start boundaries", () => {
     expect(enqueue).not.toHaveBeenCalled();
     expect(startModel).not.toHaveBeenCalled();
     expect(spawnCodex).not.toHaveBeenCalled();
+  });
+
+  it("rejects the previous owner and accepts the replacement before queue or model work", async () => {
+    const directory = new MutableDirectory();
+    directory.identities.set(
+      ownerIdentityId,
+      identity(ownerIdentityId, "owner", { revokedAt: new Date() }),
+    );
+    directory.identities.set(
+      replacementOwnerIdentityId,
+      identity(replacementOwnerIdentityId, "owner"),
+    );
+    const ingest = vi.fn(async () => "accepted" as const);
+    const boundary = new SecureAuthorizeAndIngest(authorizer(directory), {
+      ingestAuthorized: ingest,
+    });
+
+    await expect(
+      boundary.authorizeAndIngest(inbound("owner@example.com"), {}),
+    ).resolves.toBe("unauthorized");
+    expect(ingest).not.toHaveBeenCalled();
+
+    await expect(
+      boundary.authorizeAndIngest(inbound("new-owner@example.com"), {}),
+    ).resolves.toBe("accepted");
+    expect(ingest).toHaveBeenCalledOnce();
   });
 
   it.each([

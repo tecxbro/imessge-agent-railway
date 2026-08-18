@@ -5,7 +5,12 @@ import {
 } from "./http/readiness.js";
 import type { ChatGptSetupController } from "./agent/codex-app-server-auth.js";
 import { startHealthServer, type HealthServer } from "./http/server.js";
+import type { ModelSettingsController } from "./http/server.js";
 import type { DeploymentPageOptions } from "./http/deployment-page.js";
+import type {
+  DeploymentIdentityController,
+  DeploymentIdentityStatus,
+} from "./runtime/deployment-identity.js";
 import type { PhotonSetupController } from "./transport/photon-setup.js";
 import {
   GracefulShutdown,
@@ -25,6 +30,10 @@ export interface AgentServiceBootstrap {
   prepareStorage(): Promise<void>;
   connectDatabase(): Promise<void>;
   applyMigrations(): Promise<void>;
+  initializeDeploymentIdentity?(): Promise<{
+    status: DeploymentIdentityStatus;
+    migrationRequired: boolean;
+  }>;
   startQueue(): Promise<void>;
   checkCodex(): Promise<CodexStartupState>;
   configureSupermemory(): Promise<
@@ -52,9 +61,11 @@ export interface StartAgentServiceOptions {
   port: number;
   host?: string;
   bootstrap: AgentServiceBootstrap;
+  deploymentIdentity?: DeploymentIdentityController;
   deploymentPage?: Omit<DeploymentPageOptions, "runtimeMode">;
   photonSetup?: PhotonSetupController;
   chatgptSetup?: ChatGptSetupController;
+  modelSettings?: ModelSettingsController;
   installSignalHandlers?: boolean;
   onStartupFailure?: (code: string) => void;
 }
@@ -96,6 +107,9 @@ export async function startAgentService(
     ...(options.host === undefined ? {} : { host: options.host }),
     readiness,
     spectrum: spectrumReadiness,
+    ...(options.deploymentIdentity === undefined
+      ? {}
+      : { deploymentIdentity: options.deploymentIdentity }),
     deploymentPage: {
       ...(options.deploymentPage ?? {
         authMode: "chatgpt",
@@ -109,6 +123,9 @@ export async function startAgentService(
     ...(options.chatgptSetup === undefined
       ? {}
       : { chatgptSetup: options.chatgptSetup }),
+    ...(options.modelSettings === undefined
+      ? {}
+      : { modelSettings: options.modelSettings }),
   });
 
   shutdown.register({
@@ -121,6 +138,7 @@ export async function startAgentService(
   let startupStagesReady = false;
   let codexChecked = false;
   let codexReady = false;
+  let codexProbeInProgress = false;
   let spectrumStarted = false;
   let unlockAgain = false;
   let forceCodexProbe = false;
@@ -129,12 +147,16 @@ export async function startAgentService(
   const photonConnected = (): boolean =>
     options.photonSetup === undefined ||
     options.photonSetup.status().state === "connected";
+  const ownerConfigured = (): boolean =>
+    options.deploymentIdentity === undefined ||
+    options.deploymentIdentity.status().state === "configured";
 
   const refreshCodexReadiness = async (): Promise<boolean> => {
     codexChecked = true;
     readiness.mark("codexAuth", "starting");
     readiness.mark("codexCapabilities", "starting");
     let codex: CodexStartupState;
+    codexProbeInProgress = true;
     try {
       codex = await options.bootstrap.checkCodex();
     } catch {
@@ -148,6 +170,8 @@ export async function startAgentService(
       options.onStartupFailure?.("CODEX_CHECK_FAILED");
       spectrumReadiness.markStopped();
       return false;
+    } finally {
+      codexProbeInProgress = false;
     }
     readiness.mark("codexAuth", codex.auth, codex.authCode);
     readiness.mark(
@@ -160,7 +184,7 @@ export async function startAgentService(
   };
 
   const tryUnlockAgent = async (forceProbe: boolean): Promise<void> => {
-    if (!startupStagesReady || shutdown.signal.aborted || spectrumStarted) {
+    if (!startupStagesReady || shutdown.signal.aborted) {
       return;
     }
 
@@ -170,7 +194,16 @@ export async function startAgentService(
       }
     }
 
-    if (!codexReady || !photonConnected() || shutdown.signal.aborted) {
+    if (spectrumStarted) {
+      return;
+    }
+
+    if (
+      !codexReady ||
+      !ownerConfigured() ||
+      !photonConnected() ||
+      shutdown.signal.aborted
+    ) {
       spectrumReadiness.markStopped();
       return;
     }
@@ -192,21 +225,60 @@ export async function startAgentService(
   const requestUnlock = (forceProbe: boolean): Promise<void> => {
     unlockAgain = true;
     forceCodexProbe ||= forceProbe;
-    unlockPromise ??= (async () => {
-      while (unlockAgain && !shutdown.signal.aborted) {
-        const probe = forceCodexProbe;
-        unlockAgain = false;
-        forceCodexProbe = false;
-        await tryUnlockAgent(probe);
-      }
-    })().finally(() => {
-      unlockPromise = undefined;
-    });
+    unlockPromise ??= Promise.resolve()
+      .then(async () => {
+        // Start only after unlockPromise is assigned so synchronous callbacks
+        // cannot enter requestUnlock and create a second runner.
+        while (unlockAgain && !shutdown.signal.aborted) {
+          const probe = forceCodexProbe;
+          unlockAgain = false;
+          forceCodexProbe = false;
+          await tryUnlockAgent(probe);
+        }
+      })
+      .finally(() => {
+        unlockPromise = undefined;
+        if (unlockAgain && !shutdown.signal.aborted) {
+          return requestUnlock(false);
+        }
+        return undefined;
+      });
     return unlockPromise;
   };
 
+  const disposeIdentityListener = options.deploymentIdentity?.onConfigured(
+    async () => {
+      readiness.mark("ownerIdentity", "ok");
+      await requestUnlock(false);
+    },
+  );
+  if (disposeIdentityListener !== undefined) {
+    shutdown.register({
+      name: "deployment-identity-listener",
+      priority: 5,
+      timeoutMs: 1_000,
+      stop: async () => {
+        disposeIdentityListener();
+      },
+    });
+  }
   options.photonSetup?.onConnected?.(() => requestUnlock(false));
   options.chatgptSetup?.onConnected(() => requestUnlock(true));
+  const disposeCapabilitiesListener =
+    options.chatgptSetup?.onCapabilitiesChanged((capabilities) => {
+      if (capabilities.state === "refreshing" || codexProbeInProgress) {
+        return;
+      }
+      void requestUnlock(true);
+    });
+  if (disposeCapabilitiesListener !== undefined) {
+    shutdown.register({
+      name: "codex-capabilities-listener",
+      priority: 5,
+      timeoutMs: 1_000,
+      stop: async () => disposeCapabilitiesListener(),
+    });
+  }
 
   try {
     readiness.mark("configuration", "starting");
@@ -254,6 +326,50 @@ export async function startAgentService(
       options.bootstrap.applyMigrations,
     );
     readiness.mark("migrations", "ok");
+
+    readiness.mark("ownerIdentity", "starting");
+    if (options.bootstrap.initializeDeploymentIdentity === undefined) {
+      readiness.mark("ownerIdentity", "ok");
+    } else {
+      let identityInitialization: Awaited<
+        ReturnType<
+          NonNullable<
+            AgentServiceBootstrap["initializeDeploymentIdentity"]
+          >
+        >
+      >;
+      try {
+        identityInitialization =
+          await options.bootstrap.initializeDeploymentIdentity();
+      } catch (error) {
+        throw new StartupStageError("OWNER_IDENTITY_STORAGE_FAILED", {
+          cause: error,
+        });
+      }
+      if (identityInitialization.migrationRequired) {
+        readiness.mark(
+          "ownerIdentity",
+          "failed",
+          "OWNER_IDENTITY_MIGRATION_REQUIRED",
+        );
+      } else if (identityInitialization.status.state === "configured") {
+        readiness.mark("ownerIdentity", "ok");
+      } else if (
+        identityInitialization.status.state === "not_configured"
+      ) {
+        readiness.mark(
+          "ownerIdentity",
+          "missing",
+          "OWNER_IDENTITY_NOT_CONFIGURED",
+        );
+      } else if (identityInitialization.status.state === "failed") {
+        readiness.mark(
+          "ownerIdentity",
+          "failed",
+          identityInitialization.status.code,
+        );
+      }
+    }
 
     readiness.mark("queue", "starting");
     await runStartupStage("QUEUE_UNAVAILABLE", options.bootstrap.startQueue);
@@ -306,6 +422,8 @@ export async function startAgentService(
       readiness.mark("database", "failed", code);
     } else if (code === "MIGRATIONS_PENDING") {
       readiness.mark("migrations", "failed", code);
+    } else if (code === "OWNER_IDENTITY_STORAGE_FAILED") {
+      readiness.mark("ownerIdentity", "failed", code);
     } else if (code === "QUEUE_UNAVAILABLE") {
       readiness.mark("queue", "failed", code);
     } else if (code === "SPECTRUM_START_FAILED") {

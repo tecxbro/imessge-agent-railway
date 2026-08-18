@@ -1,116 +1,97 @@
-# Model Routing
+# Account-aware model selection
 
-## 1. Goals
+## 1. Product contract
 
-- Make latency, quality, and cost explicit.
-- Preserve the requested Luna-centered experience while keeping Terra and Sol available.
-- Let the deployer change models without editing orchestration code.
-- Prevent unsupported effort settings from silently degrading.
-- Keep model selection separate from permissions: a stronger model does not receive broader access.
-
-## 2. Profiles
-
-| Profile | Default model | Effort | Intended use |
-|---|---|---|---|
-| `fast` | `gpt-5.6-luna` | `medium` | Greetings, commands, short classification, low-risk direct answers |
-| `main` | `gpt-5.6-luna` | `high` | Default interaction agent, normal planning, ordinary synthesis |
-| `balanced` | `gpt-5.6-terra` | `high` | Larger context, broader analysis, quality/cost balance |
-| `hard` | `gpt-5.6-luna` | `max` | Fast model with maximum reasoning for difficult but bounded tasks |
-| `deep` | `gpt-5.6-sol` | `max` | Hardest architecture, debugging, multi-source synthesis, or explicit user selection |
-
-All names and efforts are configurable through environment variables. A deployer may map `main` to Terra/high or `hard` to Sol/max without changing code.
-
-## 3. Important compatibility rule
-
-GPT-5.6 documentation describes `max` as a reasoning-effort setting. The sampled Codex TypeScript SDK type may expose only `minimal | low | medium | high | xhigh` in a given version. The implementation must therefore treat model/effort compatibility as a runtime capability, not an assumption.
-
-Required behavior:
-
-1. Pin tested Codex CLI and SDK versions.
-2. At startup, probe each configured model/effort pair using the supported CLI/config mechanism.
-3. Record the exact capability result in readiness.
-4. With `ALLOW_REASONING_FALLBACK=false`, fail readiness if `max` is unsupported.
-5. With an explicit fallback enabled, map `max → xhigh` and emit a high-visibility warning naming the affected profile.
-6. Never silently switch models or effort.
-
-## 4. Auto-routing
-
-Auto-routing begins with deterministic code rules:
+Every deployment stores this owner preference by default:
 
 ```text
-Slash command or health/status                 → fast
-Simple conversational answer, no tools         → main
-Long context or multi-document synthesis       → balanced
-Repository work with bounded complexity        → main or balanced
-Ambiguous architecture/debugging               → hard
-Cross-repository, high-stakes, repeated failure→ deep
-User explicitly selects a profile              → selected profile
+Model: GPT-5.6 Luna
+Reasoning: High
 ```
 
-A lightweight interaction decision may refine `main`, `balanced`, or `hard`, but cannot select a model outside the configured allowlist.
+The setting is deployment-wide and is changed only through **Dashboard →
+Advanced**. There is no request-complexity router, per-space override,
+automatic escalation, or retry loop across models and efforts. `/model` is a
+read-only view of the deployment selection.
 
-## 5. Escalation
+Model choice remains independent from permissions. Changing the model cannot
+broaden workspace, network, write, approval, or secret access.
 
-Escalation is based on observable events:
+## 2. Account authority
 
-- Structured output fails twice.
-- The execution result reports insufficient reasoning.
-- Tests fail after one bounded repair attempt.
-- The task graph exceeds configured complexity.
-- The user explicitly asks for deeper reasoning.
+In ChatGPT mode, [Codex App Server](https://developers.openai.com/codex/app-server)
+is the entitlement authority:
 
-A task may escalate at most once automatically. Further escalation requires the interaction agent to explain the problem or ask for a decision when cost or permissions materially change.
+- `account/read` and `account/updated` provide the displayed `planType`;
+- `model/list` provides visible models, supported reasoning efforts, and the
+  provider-recommended defaults; and
+- every `model/list` cursor is followed with `includeHidden: false`.
 
-## 6. Per-space override
+The plan name is metadata, not an entitlement table. The application never
+infers model access from Free, Go, Plus, Pro, Business, or Enterprise labels.
+It does not expose the account email or persist the full model catalog.
 
-`/model` behavior:
+## 3. Preferred and effective selection
 
-```text
-/model auto       use router and deployment defaults
-/model fast       force fast profile for this space
-/model main       force main profile
-/model balanced   force balanced profile
-/model hard       force hard profile
-/model deep       force deep profile
-/model            show current and available profiles
-```
+PostgreSQL keeps the owner preference separate from the effective pair:
 
-The override is stored in `spaces.model_profile_override`. It affects future turns, not a running chain.
+1. Use the preferred model and effort when that exact pair is advertised.
+2. Otherwise use the model marked `isDefault` and its
+   `defaultReasoningEffort`.
+3. If no model is marked default, use the first visible model and its default
+   effort.
+4. If no visible model exists, mark model selection unavailable and keep
+   intake not ready.
 
-## 7. Permission independence
+A fallback never overwrites the stored preference. Advanced shows both the
+preferred and active values and explains that Luna High is unavailable for the
+current account. A later catalog refresh can therefore restore the preferred
+pair automatically.
 
-These are separate decisions:
+## 4. Chain consistency
 
-```ts
-resolveModelProfile(intent, userOverride)
-resolvePermissionProfile(taskType, policy, approvalState)
-```
+When inbound messages create a chain, the deployment's current effective
+`modelId`, `reasoningEffort`, and selection source are copied into the chain.
+Planning, every delegated execution task, and final synthesis load that same
+snapshot. A dashboard change affects the next chain; work already running does
+not change models.
 
-`deep` does not imply network, write, or dangerous access. A `fast` task can still require approval if it proposes a consequential action.
+Legacy deployment, space, chain, task, and agent-thread profile columns remain
+for migration compatibility. The runtime does not read them. Where a legacy
+non-null column still requires a value, code writes `main` only as inert
+compatibility data.
 
-## 8. Usage accounting
+## 5. Validation and readiness
 
-For each model turn record, when available:
+Before saving an Advanced selection, the server:
 
-- Model and effort.
-- Input/output tokens.
-- Cached input tokens.
-- Latency.
-- Profile source: default, router, user override, escalation.
-- Estimated API cost only in API-key mode.
-- ChatGPT subscription mode is recorded as entitlement-based rather than assigning misleading per-token API charges.
+1. refreshes the visible Codex catalog;
+2. verifies the exact model and effort are still advertised;
+3. runs one bounded probe of that exact pair; and
+4. persists the preference only after the probe succeeds.
 
-## 9. Evaluation suite
+Readiness refreshes account capabilities, resolves the effective pair, and
+probes only that pair. Unsupported unused models do not affect readiness.
+Account/catalog changes re-run the resolution and readiness probe. The runtime
+never substitutes another pair during a user turn.
 
-Maintain a versioned routing fixture set:
+API-key mode has no ChatGPT catalog, so it activates only the stored preference
+after that exact pair passes the same bounded probe. The ChatGPT-only Advanced
+picker is not rendered.
 
-| Fixture class | Expected profile |
-|---|---|
-| `/status` | fast |
-| “remember I prefer aisle seats” | main |
-| “summarize these six design docs” | balanced |
-| “fix this failing test in one package” | main/balanced by context size |
-| “debug a cross-service race after two failed attempts” | hard/deep |
-| “perform a formal architecture review across three repos” | deep |
+## 6. HTTP boundary
 
-Evaluation fails on nondeterministic profile drift unless the fixture explicitly permits a bounded set.
+`GET /api/settings/model` returns plan metadata, preferred/effective state, and
+only picker-safe visible model fields. `PUT /api/settings/model` accepts an
+exact `{ modelId, reasoningEffort }` object, requires the dashboard's
+same-origin boundary, refreshes and probes server-side, and returns stable
+malformed, stale, rejected-pair, or unavailable error codes. Both responses
+are private and `no-store`.
+
+## 7. Verification
+
+Tests cover account updates and pagination, fallback resolution, malformed
+provider responses, logout, exact API validation, same-origin writes, dynamic
+effort options, Luna High restoration, chain snapshots, restart persistence,
+and identical planning/execution/synthesis selection. Protected live Codex
+evidence remains a separate release gate.

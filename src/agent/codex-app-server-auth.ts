@@ -11,6 +11,13 @@ import {
 import { z } from "zod";
 
 import { buildCodexChildEnvironment } from "./child-environment.js";
+import {
+  cloneCapabilitiesSnapshot,
+  type CapabilitiesListener,
+  type CodexAccountCapabilitiesSnapshot,
+  type CodexModelOption,
+} from "./codex-account-capabilities.js";
+import { reasoningEffortSchema } from "../config/model-profiles.js";
 
 const MAXIMUM_PROTOCOL_LINE_BYTES = 1_048_576;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -135,6 +142,96 @@ const loginCompletedSchema = z
   })
   .passthrough();
 
+const accountUpdatedSchema = z
+  .object({
+    authMode: z.string().trim().min(1).max(128).nullable(),
+    planType: z.string().trim().min(1).max(64).nullable(),
+  })
+  .passthrough();
+
+const wireReasoningEffortSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9_-]*$/iu);
+
+const codexModelOptionSchema = z
+  .object({
+    id: z.string().trim().min(1).max(128),
+    model: z.string().trim().min(1).max(128),
+    displayName: z.string().trim().min(1).max(256),
+    supportedReasoningEfforts: z
+      .array(
+        z
+          .object({
+            reasoningEffort: wireReasoningEffortSchema,
+            description: z.string().max(2_000),
+          })
+          .passthrough(),
+      )
+      .min(1)
+      .max(32),
+    defaultReasoningEffort: wireReasoningEffortSchema,
+    isDefault: z.boolean(),
+  })
+  .passthrough()
+  .refine(
+    (model) =>
+      model.supportedReasoningEfforts.some(
+        (effort) => effort.reasoningEffort === model.defaultReasoningEffort,
+      ),
+    "The default reasoning effort must be included in supportedReasoningEfforts.",
+  );
+
+const modelListSchema = z
+  .object({
+    data: z.array(codexModelOptionSchema).max(1_000),
+    nextCursor: z.string().trim().min(1).max(2_048).nullable(),
+  })
+  .passthrough();
+
+type WireCodexModelOption = z.infer<typeof codexModelOptionSchema>;
+
+function normalizeCodexModelOption(
+  model: WireCodexModelOption,
+): CodexModelOption | undefined {
+  const supportedReasoningEfforts: Array<
+    CodexModelOption["supportedReasoningEfforts"][number]
+  > = [];
+  const seenEfforts = new Set<string>();
+  for (const effort of model.supportedReasoningEfforts) {
+    const parsed = reasoningEffortSchema.safeParse(effort.reasoningEffort);
+    if (!parsed.success || seenEfforts.has(parsed.data)) {
+      continue;
+    }
+    seenEfforts.add(parsed.data);
+    supportedReasoningEfforts.push({
+      reasoningEffort: parsed.data,
+      description: effort.description,
+    });
+  }
+
+  const defaultReasoningEffort = reasoningEffortSchema.safeParse(
+    model.defaultReasoningEffort,
+  );
+  if (
+    !defaultReasoningEffort.success ||
+    !seenEfforts.has(defaultReasoningEffort.data)
+  ) {
+    return undefined;
+  }
+
+  return {
+    id: model.id,
+    model: model.model,
+    displayName: model.displayName,
+    supportedReasoningEfforts,
+    defaultReasoningEffort: defaultReasoningEffort.data,
+    isDefault: model.isDefault,
+  };
+}
+
 export const CHATGPT_SETUP_ERROR_CODES = [
   "CHATGPT_SETUP_UNAVAILABLE",
   "CHATGPT_APP_SERVER_UNAVAILABLE",
@@ -165,6 +262,9 @@ export interface ChatGptSetupController {
   initialize(): Promise<ChatGptSetupStatus>;
   start(): Promise<ChatGptSetupStatus>;
   status(): ChatGptSetupStatus;
+  capabilities(): CodexAccountCapabilitiesSnapshot;
+  refreshCapabilities(): Promise<CodexAccountCapabilitiesSnapshot>;
+  onCapabilitiesChanged(listener: CapabilitiesListener): () => void;
   onConnected(listener: ConnectedListener): () => void;
   close(): Promise<void>;
 }
@@ -425,10 +525,21 @@ export class CodexAppServerAuth implements ChatGptSetupController {
   readonly #codexHome: string;
   readonly #connectionFactory: CodexAppServerConnectionFactory;
   readonly #connectedListeners = new Set<ConnectedListener>();
+  readonly #capabilitiesListeners = new Set<CapabilitiesListener>();
   #connection: CodexAppServerConnection | undefined;
   #connecting: Promise<CodexAppServerConnection> | undefined;
   #starting: Promise<ChatGptSetupStatus> | undefined;
+  #capabilitiesRefresh:
+    | Promise<CodexAccountCapabilitiesSnapshot>
+    | undefined;
   #status: ChatGptSetupStatus = { state: "not_connected" };
+  #capabilitiesSnapshot: CodexAccountCapabilitiesSnapshot = {
+    state: "unavailable",
+    planType: null,
+    models: [],
+    refreshedAt: null,
+  };
+  #accountState: "unknown" | "connected" | "not_connected" = "unknown";
   #loginId: string | undefined;
   readonly #earlyCompletions = new Map<string, LoginCompleted>();
   #closing = false;
@@ -459,16 +570,40 @@ export class CodexAppServerAuth implements ChatGptSetupController {
     return () => this.#connectedListeners.delete(listener);
   }
 
+  public capabilities(): CodexAccountCapabilitiesSnapshot {
+    return cloneCapabilitiesSnapshot(this.#capabilitiesSnapshot);
+  }
+
+  public onCapabilitiesChanged(listener: CapabilitiesListener): () => void {
+    this.#capabilitiesListeners.add(listener);
+    return () => this.#capabilitiesListeners.delete(listener);
+  }
+
+  public async refreshCapabilities(): Promise<CodexAccountCapabilitiesSnapshot> {
+    if (this.#capabilitiesRefresh !== undefined) {
+      return await this.#capabilitiesRefresh;
+    }
+    this.#capabilitiesRefresh = this.#refreshCapabilities();
+    try {
+      return await this.#capabilitiesRefresh;
+    } finally {
+      this.#capabilitiesRefresh = undefined;
+    }
+  }
+
   public async initialize(): Promise<ChatGptSetupStatus> {
     try {
-      const connection = await this.#ensureConnection();
-      const account = accountReadSchema.parse(
-        await connection.request("account/read", { refreshToken: false }),
-      );
+      await this.#ensureConnection();
+      await this.refreshCapabilities();
       this.#status =
-        account.account?.type === "chatgpt"
+        this.#accountState === "connected"
           ? { state: "connected" }
-          : { state: "not_connected" };
+          : this.#accountState === "not_connected"
+            ? { state: "not_connected" }
+            : {
+                state: "failed",
+                code: "CHATGPT_APP_SERVER_UNAVAILABLE",
+              };
     } catch {
       this.#status = {
         state: "failed",
@@ -501,6 +636,12 @@ export class CodexAppServerAuth implements ChatGptSetupController {
     this.#closing = true;
     this.#loginId = undefined;
     this.#earlyCompletions.clear();
+    await this.#replaceCapabilities({
+      state: "unavailable",
+      planType: null,
+      models: [],
+      refreshedAt: null,
+    });
     const connection = this.#connection;
     const connecting = this.#connecting;
     this.#connection = undefined;
@@ -580,6 +721,18 @@ export class CodexAppServerAuth implements ChatGptSetupController {
           code: "CHATGPT_APP_SERVER_UNAVAILABLE",
         };
       }
+      if (!this.#closing) {
+        void this.#replaceCapabilities({
+          state: "unavailable",
+          planType: null,
+          models: [],
+          refreshedAt: null,
+        }).then(async () => {
+          if (this.#status.state === "connected") {
+            await this.refreshCapabilities().catch(() => undefined);
+          }
+        });
+      }
     });
     try {
       const initialized = initializeResponseSchema.parse(
@@ -610,6 +763,31 @@ export class CodexAppServerAuth implements ChatGptSetupController {
   async #handleNotification(
     notification: AppServerNotification,
   ): Promise<void> {
+    if (notification.method === "account/updated") {
+      const updated = accountUpdatedSchema.safeParse(notification.params);
+      if (!updated.success) {
+        await this.#replaceCapabilities({
+          state: "unavailable",
+          planType: null,
+          models: [],
+          refreshedAt: null,
+        });
+        return;
+      }
+      if (updated.data.authMode === null) {
+        this.#accountState = "not_connected";
+        this.#status = { state: "not_connected" };
+      }
+      await this.refreshCapabilities();
+      if (
+        this.#accountState === "connected" &&
+        this.#status.state !== "starting" &&
+        this.#status.state !== "awaiting_authorization"
+      ) {
+        this.#status = { state: "connected" };
+      }
+      return;
+    }
     if (notification.method !== "account/login/completed") {
       return;
     }
@@ -652,11 +830,8 @@ export class CodexAppServerAuth implements ChatGptSetupController {
       return;
     }
     try {
-      const connection = await this.#ensureConnection();
-      const account = accountReadSchema.parse(
-        await connection.request("account/read", { refreshToken: false }),
-      );
-      if (account.account?.type !== "chatgpt") {
+      await this.refreshCapabilities();
+      if (this.#accountState !== "connected") {
         this.#loginId = undefined;
         this.#status = { state: "failed", code: "CHATGPT_LOGIN_FAILED" };
         return;
@@ -675,6 +850,108 @@ export class CodexAppServerAuth implements ChatGptSetupController {
     for (const listener of this.#connectedListeners) {
       void Promise.resolve(listener()).catch(() => undefined);
     }
+  }
+
+  async #refreshCapabilities(): Promise<CodexAccountCapabilitiesSnapshot> {
+    await this.#replaceCapabilities({
+      ...this.#capabilitiesSnapshot,
+      state: "refreshing",
+    });
+    const connection = await this.#ensureConnection().catch(() => undefined);
+    if (connection === undefined) {
+      this.#accountState = "unknown";
+      return await this.#replaceCapabilities({
+        state: "unavailable",
+        planType: null,
+        models: [],
+        refreshedAt: null,
+      });
+    }
+
+    let account: z.infer<typeof accountReadSchema>;
+    try {
+      account = accountReadSchema.parse(
+        await connection.request("account/read", { refreshToken: false }),
+      );
+    } catch {
+      this.#accountState = "unknown";
+      return await this.#replaceCapabilities({
+        state: "unavailable",
+        planType: null,
+        models: [],
+        refreshedAt: null,
+      });
+    }
+
+    if (account.account?.type !== "chatgpt") {
+      this.#accountState = "not_connected";
+      return await this.#replaceCapabilities({
+        state: "unavailable",
+        planType: null,
+        models: [],
+        refreshedAt: new Date(),
+      });
+    }
+    this.#accountState = "connected";
+
+    try {
+      const models: WireCodexModelOption[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | null = null;
+      do {
+        const page = modelListSchema.parse(
+          await connection.request("model/list", {
+            limit: 100,
+            includeHidden: false,
+            ...(cursor === null ? {} : { cursor }),
+          }),
+        );
+        models.push(...page.data);
+        cursor = page.nextCursor;
+        if (cursor !== null) {
+          if (seenCursors.has(cursor) || seenCursors.size >= 100) {
+            throw new CodexAppServerProtocolError();
+          }
+          seenCursors.add(cursor);
+        }
+      } while (cursor !== null);
+
+      const uniqueModels = new Map<string, CodexModelOption>();
+      const seenModelIds = new Set<string>();
+      for (const model of models) {
+        if (seenModelIds.has(model.id)) {
+          throw new CodexAppServerProtocolError();
+        }
+        seenModelIds.add(model.id);
+        const normalized = normalizeCodexModelOption(model);
+        if (normalized !== undefined) {
+          uniqueModels.set(model.id, normalized);
+        }
+      }
+      return await this.#replaceCapabilities({
+        state: "available",
+        planType: account.account.planType,
+        models: [...uniqueModels.values()],
+        refreshedAt: new Date(),
+      });
+    } catch {
+      return await this.#replaceCapabilities({
+        state: "unavailable",
+        planType: null,
+        models: [],
+        refreshedAt: null,
+      });
+    }
+  }
+
+  async #replaceCapabilities(
+    snapshot: CodexAccountCapabilitiesSnapshot,
+  ): Promise<CodexAccountCapabilitiesSnapshot> {
+    this.#capabilitiesSnapshot = cloneCapabilitiesSnapshot(snapshot);
+    for (const listener of this.#capabilitiesListeners) {
+      await Promise.resolve(listener(this.capabilities())).catch(() => undefined);
+    }
+    return this.capabilities();
   }
 
   async #validateAndRestrictAuthFile(): Promise<void> {

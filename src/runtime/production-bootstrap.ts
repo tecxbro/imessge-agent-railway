@@ -21,6 +21,10 @@ import { CodexClient } from "../agent/codex-client.js";
 import { buildCodexChildEnvironment } from "../agent/child-environment.js";
 import { ExecutionRuntime } from "../agent/execution-runtime.js";
 import { InteractionRuntime } from "../agent/interaction-runtime.js";
+import {
+  modelSupportsSelection,
+  type ModelSelection,
+} from "../agent/model-selection.js";
 import { ThreadStore } from "../agent/thread-store.js";
 import {
   createCodexPairRunner,
@@ -28,7 +32,6 @@ import {
 } from "../config/capabilities.js";
 import {
   loadEnvironment,
-  modelProfilesFromEnvironment,
   type Environment,
 } from "../config/env.js";
 import { loadPromptBundle } from "../config/prompt-bundle.js";
@@ -40,11 +43,19 @@ import { PostgresCodexThreadRepository } from "../db/repositories/codex-threads.
 import { FailureRepository } from "../db/repositories/failures.js";
 import { InboundRepository } from "../db/repositories/inbound.js";
 import { PostgresMemoryReceiptStore } from "../db/repositories/memory-receipts.js";
+import {
+  ModelPreferenceUnavailableError,
+  ModelSettingsRepository,
+} from "../db/repositories/model-settings.js";
 import { OperationalRepository } from "../db/repositories/operational.js";
 import { OrchestrationRepository } from "../db/repositories/orchestration.js";
 import { OutboundRepository } from "../db/repositories/outbound.js";
 import { RetentionRepository } from "../db/repositories/retention.js";
 import type { AgentServiceBootstrap } from "../index.js";
+import {
+  ModelSettingsApiError,
+  type ModelSettingsController,
+} from "../http/server.js";
 import { recallMemoryContext } from "../memory/recall.js";
 import {
   SupermemoryClient,
@@ -90,6 +101,12 @@ import {
 } from "../transport/spectrum.js";
 import { PhotonCredentialsStore } from "./photon-credentials.js";
 import { preparePersistentStorage } from "./persistent-storage.js";
+import {
+  createDeploymentIdentityController,
+  initializeDeploymentIdentityController,
+  selectLegacyOwnerPhoneNumber,
+  type DeploymentIdentityController,
+} from "./deployment-identity.js";
 
 interface QueueComposition {
   operational: OperationalRepository;
@@ -109,8 +126,10 @@ export interface ProductionRuntime {
   logger: Logger;
   promptBundleVersion: string;
   bootstrap: AgentServiceBootstrap;
+  deploymentIdentity: DeploymentIdentityController;
   photonSetup: PhotonSetupController;
   chatgptSetup?: ChatGptSetupController;
+  modelSettings: ModelSettingsController;
 }
 
 function required<Value>(value: Value | undefined, stage: string): Value {
@@ -131,10 +150,9 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
   const storedPhotonSetup = await photonCredentialsStore.load();
   const legacySpectrumCredentials =
     spectrumCredentialsFromEnvironment(environment);
+  const deploymentIdentity = createDeploymentIdentityController();
   const photonSetup = new PhotonSetupService({
-    ...(environment.OWNER_PHONE_NUMBER === undefined
-      ? {}
-      : { ownerPhoneNumber: environment.OWNER_PHONE_NUMBER }),
+    ownerIdentity: deploymentIdentity,
     credentialsStore: photonCredentialsStore,
     ...(storedPhotonSetup === undefined
       ? {}
@@ -143,14 +161,17 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
   });
   let spectrumCredentials: SpectrumCloudCredentials | undefined =
     resolveSpectrumCloudCredentials(storedPhotonSetup, environment);
-  const ownerHandles =
-    storedPhotonSetup === undefined
-      ? environment.AGENT_OWNER_HANDLES
-      : [storedPhotonSetup.ownerPhoneNumber];
-  const protectedValues = [
+  const protectedValues: string[] = [
     environment.DATABASE_URL,
     environment.APP_ENCRYPTION_KEY,
-    ...ownerHandles,
+    ...(environment.OWNER_PHONE_NUMBER === undefined
+      ? []
+      : [environment.OWNER_PHONE_NUMBER]),
+    ...(environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123 ===
+    undefined
+      ? []
+      : [environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123]),
+    ...environment.AGENT_OWNER_HANDLES,
     ...(environment.SPECTRUM_PROJECT_SECRET === undefined
       ? []
       : [environment.SPECTRUM_PROJECT_SECRET]),
@@ -160,6 +181,7 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
           storedPhotonSetup.photonDeviceBearerToken,
           storedPhotonSetup.photonProjectId,
           storedPhotonSetup.spectrumProjectSecret,
+          storedPhotonSetup.ownerPhoneNumber,
           storedPhotonSetup.assignedIMessageNumber,
         ]),
     ...(environment.OPENAI_API_KEY === undefined
@@ -170,6 +192,11 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
       : [environment.SUPERMEMORY_API_KEY]),
   ];
   const logger = createLogger({ protectedValues });
+  const protectValue = (value: string): void => {
+    if (!protectedValues.includes(value)) {
+      protectedValues.push(value);
+    }
+  };
   const inFlightChains = new InFlightChainRegistry();
   const interruptSupersededChains = (chainIds: readonly string[]): void => {
     const abortedWorkCount = inFlightChains.cancel(chainIds);
@@ -185,7 +212,6 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
     }
   };
   const promptBundle = await loadPromptBundle();
-  const modelProfiles = modelProfilesFromEnvironment(environment);
   const codexParentEnvironment = {
     PATH: environment.PATH,
     ...(environment.LANG === undefined ? {} : { LANG: environment.LANG }),
@@ -219,14 +245,93 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
     maximumConcurrency: environment.MAX_EXECUTION_CONCURRENCY,
     maximumConcurrencyPerOwner: environment.MAX_OWNER_EXECUTION_CONCURRENCY,
   });
+  const pairRunner = createCodexPairRunner(
+    codex,
+    environment.AGENT_WORKSPACE_ROOT,
+  );
 
   // Mutable provider lifecycle state
   let databaseClient: DatabaseClient | undefined;
+  let operationalRepository: OperationalRepository | undefined;
+  let modelSettingsRepository: ModelSettingsRepository | undefined;
   let queue: DurableQueue | undefined;
   let composition: QueueComposition | undefined;
   let spectrumApp: SpectrumApp | undefined;
   let spectrumLoop: Promise<void> | undefined;
   let memoryProvider: SupermemoryPort | undefined;
+
+  const syncCapabilitiesToRepository = async (
+    snapshot: ReturnType<NonNullable<typeof chatgptSetup>["capabilities"]>,
+  ): Promise<void> => {
+    const repository = modelSettingsRepository;
+    if (repository === undefined || snapshot.state === "refreshing") {
+      return;
+    }
+    await repository.syncAccountCapabilities({
+      planType: snapshot.state === "available" ? snapshot.planType : null,
+      models: snapshot.state === "available" ? snapshot.models : [],
+      refreshedAt: snapshot.refreshedAt ?? new Date(),
+    });
+  };
+  chatgptSetup?.onCapabilitiesChanged(syncCapabilitiesToRepository);
+
+  const modelSettings: ModelSettingsController = {
+    async read() {
+      const repository = modelSettingsRepository;
+      const capabilities = chatgptSetup?.capabilities();
+      if (
+        repository === undefined ||
+        capabilities === undefined ||
+        capabilities.state !== "available"
+      ) {
+        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
+      }
+      const settings = await repository.read();
+      if (
+        settings.effective === null ||
+        settings.selectionState === "pending" ||
+        settings.selectionState === "unavailable"
+      ) {
+        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
+      }
+      return { ...settings, availableModels: capabilities.models };
+    },
+    async update(selection: ModelSelection) {
+      const repository = modelSettingsRepository;
+      if (repository === undefined || chatgptSetup === undefined) {
+        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
+      }
+      const capabilities = await chatgptSetup.refreshCapabilities();
+      if (capabilities.state !== "available") {
+        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
+      }
+      const model = capabilities.models.find(
+        (candidate) => candidate.id === selection.modelId,
+      );
+      if (model === undefined || !modelSupportsSelection(model, selection)) {
+        throw new ModelSettingsApiError("MODEL_SELECTION_STALE");
+      }
+      const probe = await pairRunner.probe({
+        model: selection.modelId,
+        effort: selection.reasoningEffort,
+      });
+      if (!probe.supported) {
+        throw new ModelSettingsApiError("MODEL_PAIR_UNAVAILABLE");
+      }
+      try {
+        const settings = await repository.updatePreference({
+          ...selection,
+          currentCatalog: capabilities.models,
+        });
+        return { ...settings, availableModels: capabilities.models };
+      } catch (error) {
+        if (error instanceof ModelPreferenceUnavailableError) {
+          throw new ModelSettingsApiError("MODEL_SELECTION_STALE");
+        }
+        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
+      }
+    },
+  };
 
   // Configuration and storage startup
   const bootstrap: AgentServiceBootstrap = {
@@ -295,16 +400,58 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
       );
     },
 
-    async startQueue() {
-      const client = required(databaseClient, "Queue startup");
+    async initializeDeploymentIdentity() {
+      const client = required(databaseClient, "Deployment identity startup");
       const operational = new OperationalRepository(client.database, {
         deploymentId: environment.DEPLOYMENT_ID,
-        ownerHandles,
         fingerprintKey: environment.APP_ENCRYPTION_KEY,
         encrypt: cipher.encrypt,
         decrypt: cipher.decrypt,
       });
-      await operational.provisionDeployment();
+      await operational.ensureDeployment();
+      operationalRepository = operational;
+      modelSettingsRepository = new ModelSettingsRepository(
+        client.database,
+        environment.DEPLOYMENT_ID,
+      );
+      const capabilities = chatgptSetup?.capabilities();
+      if (
+        capabilities !== undefined &&
+        capabilities.state === "available"
+      ) {
+        await syncCapabilitiesToRepository(capabilities);
+      }
+      const legacyOwner = selectLegacyOwnerPhoneNumber({
+        ...(environment.OWNER_PHONE_NUMBER === undefined
+          ? {}
+          : { ownerPhoneNumber: environment.OWNER_PHONE_NUMBER }),
+        ...(environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123 ===
+        undefined
+          ? {}
+          : {
+              renderOwnerPhoneNumber:
+                environment.OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123,
+            }),
+        ownerHandles: environment.AGENT_OWNER_HANDLES,
+      });
+      const initialization = await initializeDeploymentIdentityController({
+        controller: deploymentIdentity,
+        repository: operational,
+        legacyOwner,
+        protectPhoneNumber: protectValue,
+      });
+      return {
+        status: initialization.status,
+        migrationRequired: initialization.migrationRequired,
+      };
+    },
+
+    async startQueue() {
+      const client = required(databaseClient, "Queue startup");
+      const operational = required(
+        operationalRepository,
+        "Queue deployment identity startup",
+      );
 
       queue = new DurableQueue({
         connectionString: environment.DATABASE_URL,
@@ -358,16 +505,34 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
 
     // Codex capability check
     async checkCodex() {
+      const repository = required(
+        modelSettingsRepository,
+        "Codex model settings check",
+      );
+      let selection: ModelSelection | null;
+      if (environment.CODEX_AUTH_MODE === "chatgpt") {
+        const capabilities = await chatgptSetup!.refreshCapabilities();
+        await syncCapabilitiesToRepository(capabilities);
+        selection = (await repository.read()).effective;
+      } else {
+        selection = (await repository.read()).preferred;
+      }
       const report = await probeCodexCapabilities({
         codexHome: environment.CODEX_HOME,
         authMode: environment.CODEX_AUTH_MODE,
         ...(environment.OPENAI_API_KEY === undefined
           ? {}
           : { openAiApiKey: environment.OPENAI_API_KEY }),
-        profiles: modelProfiles,
-        allowReasoningFallback: environment.ALLOW_REASONING_FALLBACK,
-        runner: createCodexPairRunner(codex, environment.AGENT_WORKSPACE_ROOT),
+        selection,
+        runner: pairRunner,
       });
+      if (
+        environment.CODEX_AUTH_MODE === "api_key" &&
+        report.ready &&
+        selection !== null
+      ) {
+        await repository.activateProbedPreference(selection);
+      }
       const auth = report.components.auth;
       return {
         auth:
@@ -449,7 +614,6 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         interaction,
         publisher: state.publisher,
         commandHandlers: commands,
-        modelProfiles,
         promptBundle,
         encrypt: cipher.encrypt,
         recallMemory: async (context, recallSignal) => {
@@ -511,7 +675,6 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         repository: state.orchestration,
         execution,
         publisher: state.publisher,
-        modelProfiles,
         promptBundle,
         maximumRuntimeMs: environment.MAX_TASK_RUNTIME_MS,
       });
@@ -530,7 +693,6 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         repository: state.orchestration,
         interaction,
         publisher: state.publisher,
-        modelProfiles,
         promptBundle,
         encrypt: cipher.encrypt,
       });
@@ -671,7 +833,9 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
     logger,
     promptBundleVersion: promptBundle.version,
     bootstrap,
+    deploymentIdentity,
     photonSetup,
+    modelSettings,
     ...(chatgptSetup === undefined ? {} : { chatgptSetup }),
   };
 }

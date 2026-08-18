@@ -9,8 +9,8 @@ Use the narrowest change that matches the desired behavior. Prompt and configura
 | Agent personality and conversational style | `prompts/interaction.system.md`, `prompts/voice-policy.md` |
 | How execution tasks behave | `prompts/execution.system.md` |
 | Approval rules | `prompts/approval-policy.md` |
-| Models and reasoning effort | `.env` model variables |
-| Who can message the agent | `OWNER_PHONE_NUMBER` or legacy `AGENT_OWNER_HANDLES` |
+| Models and reasoning effort | **Advanced** in the deployment dashboard |
+| Who can message the agent | **Change phone number** in the public deployment dashboard |
 | Semantic memory | `SUPERMEMORY_API_KEY` |
 | Railway service, database, volume, and networking | Railway project settings |
 | Concurrency and runtime limits | `.env` |
@@ -39,25 +39,29 @@ Do not make a prompt change that allows the model to approve, reinterpret, or br
 
 ## Models and reasoning effort
 
-Change the `MODEL_*` and `MODEL_*_EFFORT` variables documented in [Configuration](./CONFIGURATION.md). The model router selects profiles in code and probes configured pairs before Spectrum starts.
-
-Keep `ALLOW_REASONING_FALLBACK=false` unless a reviewed product requirement permits fallback. Never silently downgrade the configured model, effort, authentication mode, memory policy, or permissions.
+Connect ChatGPT, then use **Advanced** in the deployment dashboard. The picker
+shows only models and efforts from the live Codex account catalog. The default
+preference is GPT-5.6 Luna / High; a Codex-advertised fallback is shown
+separately and never overwrites that preference. Changes apply to new chains,
+not work already running.
 
 ## Authorized senders
 
-Set `OWNER_PHONE_NUMBER` for the primary single-owner flow:
+Use **Change phone number** in the public deployment dashboard for the primary single-owner flow. The server normalizes the phone to E.164, encrypts it in PostgreSQL, activates the new identity, and revokes prior owner-phone identities.
+
+`OWNER_PHONE_NUMBER` remains only as an existing-deployment migration input:
 
 ```dotenv
 OWNER_PHONE_NUMBER=+15551234567
 ```
 
-Existing deployments may keep `AGENT_OWNER_HANDLES` with comma-separated E.164 phone numbers or email addresses:
+`AGENT_OWNER_HANDLES` is also a legacy migration input. The runtime imports it automatically only when it contains exactly one E.164 phone; multiple handles or an email identity require saving the intended phone in the dashboard:
 
 ```dotenv
-AGENT_OWNER_HANDLES=+15551234567,owner@example.com
+AGENT_OWNER_HANDLES=+15551234567
 ```
 
-Spectrum line setup and the application allowlist are different boundaries. Changing the Photon project does not authorize a sender. Restart after modifying the allowlist and test both one allowed and one denied identity.
+Spectrum line setup and application authorization are different boundaries. Changing the Photon project does not authorize a sender. After changing the owner, test both the new owner and the revoked prior owner.
 
 ## Semantic memory
 

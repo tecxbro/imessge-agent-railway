@@ -26,6 +26,7 @@ Run from a clean checkout:
 ```bash
 git status --short --branch
 npm ci
+npm run repo:verify-target
 npm run typecheck
 npm test
 npm run test:security
@@ -52,10 +53,13 @@ check-jsonschema --schemafile https://railway.com/railway.schema.json railway.js
 | Check | Status | Evidence/notes |
 |---|---|---|
 | Clean dependency install | | |
+| Canonical repository target | | |
 | Typecheck | | |
 | Unit/contract tests | | |
 | Database integration tests (not skipped) | | |
 | Chaos suite | | |
+| Production build | | |
+| Documentation contract | | |
 | `git diff --check` | | |
 | Railway configuration unit validation | | |
 | Official Railway JSON schema validation | | |
@@ -82,7 +86,7 @@ curl --silent --show-error http://127.0.0.1:10000/readyz
 | `CODEX_HOME` | absolute directory, mode `0700` | | |
 | Workspace root | separate absolute directory, mode `0700` | | |
 | Codex auth | chosen mode reported; no secret printed | | |
-| Operator page | HTTP 200; identifies setup/readiness status and claims readiness only after critical checks pass | | |
+| Public setup page | HTTP 200 without a password; phone setup remains in the dashboard; readiness is claimed only after critical checks pass | | |
 | `/healthz` | HTTP 200 | | |
 | `/readyz` | HTTP 200 only after every critical component is ready | | |
 | Authorized first message | one terminal response | | |
@@ -102,15 +106,26 @@ Create a Railway project from the exact commit above.
 | Codex path | `CODEX_HOME=/var/data/codex` | | |
 | Workspace path | `AGENT_WORKSPACE_ROOT=/var/data/workspaces` | | |
 | Database wiring | `DATABASE_URL` dynamic reference; no manual URL | | |
-| Required variables | owner phone, preserved deployment ID/encryption key, storage paths; no literal secrets in source | | |
+| Required variables | encryption key and storage paths; preserved deployment ID for migrations; no literal secrets in source | | |
+| Owner setup | no owner phone or dashboard credential required in fresh service variables; owner is saved through the public dashboard | | |
 | Optional Supermemory | `SUPERMEMORY_API_KEY` absent disables memory; migrated prefix is preserved | | |
 | GitHub trigger | `main`, Wait for CI enabled before autodeploy | | |
 | Build | `npm ci --include=dev && npm run build` exits 0 | | |
 | Pre-deploy | `npm run db:migrate` exits 0 | | |
 | Start | `npm start` binds Railway `PORT` | | |
-| Operator page | generated URL explains that it is not the iMessage chat link and reports truthful readiness | | |
-| Liveness | external `/healthz` HTTP 200 | | |
-| Initial readiness | 503 only for expected Photon/ChatGPT setup or dependency state | | |
+| Public setup page | generated URL opens directly, identifies public setup exposure, and reports truthful readiness | | |
+| Pre-setup liveness | external `/healthz` returns HTTP 200 before owner, Photon, or Codex setup is complete | | |
+| Pre-setup readiness | external `/readyz` remains HTTP 503 before owner, Photon, and Codex setup are all complete | | |
+| Owner dashboard | accepts the test U.S. or international number, returns only its masked form, and never echoes the raw input | | |
+| Photon setup | dashboard reaches the completed Photon state and shows the assigned iMessage number | | |
+| ChatGPT setup | dashboard device flow reaches the completed ChatGPT state | | |
+| Advanced model settings | shows the account-advertised catalog, stored preference, and effective model/effort | | |
+| Final readiness | external `/readyz` becomes HTTP 200 after owner, Photon, ChatGPT, and all other critical checks pass | | |
+| Authorized durable acceptance | a safe database identifier proves durable acceptance before the inbound iMessage changes to read | | |
+| Authorized response | agent sends exactly one short response matching the predeclared non-sensitive fixture; record only match/no-match | | |
+| Unauthorized sender | an unauthorized inbound starts no Codex child or durable model work | | |
+| Restart persistence | a normal service restart preserves masked owner status, Photon setup, ChatGPT setup, and preferred/effective model settings | | |
+| Redeploy durability | a redeploy preserves the existing Railway volume and PostgreSQL records; no replacement volume or database is used | | |
 
 Do not record the Railway deployment as cleanly functional until this exact production entrypoint reaches `/readyz` 200 and the protected first-message checks pass.
 
@@ -118,7 +133,7 @@ Do not record the Railway deployment as cleanly functional until this exact prod
 
 ### ChatGPT mode
 
-Open the Railway service URL, authenticate Photon, then choose **Connect ChatGPT** and complete the device-code flow. As an operator fallback, use Railway SSH:
+Open the Railway service URL, enter the owner phone, authenticate Photon, choose **Connect ChatGPT**, and complete the device-code flow. Open **Advanced** and confirm or change the deployment model and reasoning effort. As an operator fallback, use Railway SSH:
 
 ```bash
 railway ssh
@@ -137,6 +152,7 @@ Add `OPENAI_API_KEY` as a Railway service variable, set `CODEX_AUTH_MODE=api_key
 | Check | Status | Evidence/notes |
 |---|---|---|
 | Chosen auth mode enforced | | |
+| Advanced shows the preferred and effective model pair | | |
 | Status/capability probe passes | | |
 | Credentials survive restart (ChatGPT mode) | | |
 | `/readyz` becomes 200 after all critical components | | |

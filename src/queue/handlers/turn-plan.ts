@@ -2,10 +2,9 @@ import { createHash } from "node:crypto";
 
 import type { InteractionRuntime } from "../../agent/interaction-runtime.js";
 import {
-  resolveModelProfile,
-  type ModelProfileOverride,
-  type RoutingIntent,
-} from "../../agent/model-router.js";
+  asCodexModelProfile,
+  type ModelSelection,
+} from "../../agent/model-selection.js";
 import type { PromptSection } from "../../agent/prompt-builder.js";
 import {
   interactionDecisionSchema,
@@ -18,7 +17,6 @@ import {
   type CommandHandlersDependencies,
 } from "../../commands/handlers.js";
 import { parseSlashCommand } from "../../commands/parse.js";
-import type { ModelProfileName, ModelProfiles } from "../../config/model-profiles.js";
 import type { PromptBundle } from "../../config/prompt-bundle.js";
 import { splitMessageBubbles } from "../../messaging/bubble-splitter.js";
 import { assertUserFacingMessageSafe } from "../../messaging/user-visible-policy.js";
@@ -39,7 +37,6 @@ export interface ActiveAgentContext {
 export interface ExecutionCapability {
   workspaceBinding: string;
   permissionProfiles: readonly PermissionProfileName[];
-  modelProfiles: readonly ModelProfileName[];
 }
 
 export interface TurnMemoryContext {
@@ -60,8 +57,7 @@ export interface TurnPlanContext {
   activeAgents: readonly ActiveAgentContext[];
   capabilities: readonly ExecutionCapability[];
   priorStatusMessages: readonly StatusHistoryEntry[];
-  modelOverride: ModelProfileOverride;
-  routingIntent: RoutingIntent;
+  modelSelection: ModelSelection;
   interactionWorkingDirectory: string;
   recoverySummary?: string;
 }
@@ -78,7 +74,6 @@ export interface QueuedExecutionTask {
 export interface TurnPlanCommitBase {
   payload: TurnPlanPayload;
   decision: InteractionDecision;
-  selectedModelProfile: ModelProfileName;
   promptVersion: string;
   promptSha256?: string;
 }
@@ -105,7 +100,6 @@ export interface TurnPlanDependencies {
     "enqueueTaskExecute" | "enqueueOutboundSend"
   >;
   commandHandlers: CommandHandlersDependencies;
-  modelProfiles: ModelProfiles;
   promptBundle: PromptBundle;
   encrypt(plaintext: string): Promise<string> | string;
   recallMemory(
@@ -209,11 +203,6 @@ export function assertExecutionTasksAuthorized(
         `Execution task ${task.id} requested a permission profile that policy does not allow. Narrow the task before retrying.`,
       );
     }
-    if (!capability.modelProfiles.includes(task.modelProfile)) {
-      throw new Error(
-        `Execution task ${task.id} requested a model profile outside the configured allowlist. Select an allowed profile before retrying.`,
-      );
-    }
   }
 }
 
@@ -256,12 +245,6 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
     }
 
     const parsedCommand = parseSlashCommand(context.currentUserMessage);
-    const selected = resolveModelProfile(
-      parsedCommand === null ? context.routingIntent : { kind: "command" },
-      context.modelOverride,
-      dependencies.modelProfiles,
-    );
-
     if (parsedCommand !== null) {
       const command = await handleSlashCommand(
         parsedCommand,
@@ -275,7 +258,6 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
       );
       const decision = interactionDecisionSchema.parse({
         mode: "direct",
-        modelProfile: "fast",
         userMessage: command.message,
         statusMessage: null,
         tasks: [],
@@ -286,7 +268,6 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
       const committed = await dependencies.repository.commitFinal({
         payload,
         decision,
-        selectedModelProfile: "fast",
         promptVersion: dependencies.promptBundle.version,
         encryptedParts: await encryptedBubbles(command.message, dependencies),
       });
@@ -301,7 +282,7 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
     const run = await dependencies.interaction.run({
       ownerId: context.ownerId,
       spaceId: context.spaceId,
-      modelProfile: selected.profile,
+      modelProfile: asCodexModelProfile(context.modelSelection),
       workingDirectory: context.interactionWorkingDirectory,
       sections: interactionSections(
         context,
@@ -318,7 +299,6 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
     const base: TurnPlanCommitBase = {
       payload,
       decision,
-      selectedModelProfile: selected.name,
       promptVersion: dependencies.promptBundle.version,
       promptSha256: run.promptSha256,
     };

@@ -14,7 +14,8 @@ import {
   type CodexThreadScope,
   type StoredCodexThread,
 } from "../../src/agent/thread-store.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
+
+const modelProfile = { model: "gpt-5.6-luna", effort: "high" } as const;
 
 const outputSchema = z.object({ ok: z.literal(true) }).strict();
 const scope: CodexThreadScope = {
@@ -67,7 +68,7 @@ function request() {
     scope,
     prompt: "current turn",
     outputSchema,
-    modelProfile: DEFAULT_MODEL_PROFILES.main,
+    modelProfile,
     permissionProfile: "read" as const,
     workingDirectory: "/tmp",
     skipGitRepoCheck: true,

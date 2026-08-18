@@ -63,7 +63,6 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
         {
           workspaceBinding: "primary-repo",
           permissionProfiles: ["read"],
-          modelProfiles: ["main"],
         },
       ],
     });
@@ -94,6 +93,9 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
       id: deploymentId,
       name: "step5-integration",
       defaultModelProfile: "main",
+      effectiveModelId: "gpt-5.6-luna",
+      effectiveReasoningEffort: "high",
+      modelSelectionState: "preferred",
     });
     await client.database.insert(owners).values({
       id: ownerId,
@@ -148,6 +150,11 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
 
   it("persists parallel roots, reuses a named context, and retains partial failure", async () => {
     const payload = await createChain();
+    const planContext = await orchestration.loadPlanContext(payload);
+    expect(planContext?.modelSelection).toEqual({
+      modelId: "gpt-5.6-luna",
+      reasoningEffort: "high",
+    });
     const task = (
       id: string,
       agentName: string,
@@ -158,7 +165,6 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
       purpose: `Complete ${id}`,
       instructions: `Return the ${id} evidence.`,
       workspaceBinding: "primary-repo",
-      modelProfile: "main" as const,
       permissionProfile: "read" as const,
       dependsOn,
     });
@@ -169,7 +175,6 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     ];
     const decision = interactionDecisionSchema.parse({
       mode: "delegate",
-      modelProfile: "main",
       userMessage: null,
       statusMessage: "I’m checking both paths now.",
       tasks,
@@ -180,7 +185,6 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     const committed = await orchestration.commitDelegation({
       payload,
       decision,
-      selectedModelProfile: "main",
       promptVersion: "1:fixture",
       tasks: tasks.map((item) => ({
         task: item,
@@ -217,6 +221,8 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     if (inspect === null || research === null) {
       throw new Error("parallel tasks were not claimable");
     }
+    expect(inspect.modelSelection).toEqual(planContext?.modelSelection);
+    expect(research.modelSelection).toEqual(planContext?.modelSelection);
     const succeeded = (taskId: string) =>
       executionResultSchema.parse({
         taskId,
@@ -265,13 +271,13 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
         .map((result) => executionResultSchema.parse(result).status)
         .sort(),
     ).toEqual(["failed", "failed", "succeeded"]);
+    expect(synthesis?.modelSelection).toEqual(planContext?.modelSelection);
   });
 
   it("atomically materializes a direct response before moving the chain to sending", async () => {
     const payload = await createChain("hello");
     const decision = interactionDecisionSchema.parse({
       mode: "direct",
-      modelProfile: "main",
       userMessage: "Hi — what would you like to work on?",
       statusMessage: null,
       tasks: [],
@@ -281,7 +287,6 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     const committed = await orchestration.commitFinal({
       payload,
       decision,
-      selectedModelProfile: "main",
       promptVersion: "1:fixture",
       promptSha256: "c".repeat(64),
       encryptedParts: ["cipher:Hi — what would you like to work on?"],
@@ -310,13 +315,11 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
       purpose: "Prepare the exact external action.",
       instructions: "Return an approval proposal without executing it.",
       workspaceBinding: "primary-repo",
-      modelProfile: "main" as const,
       permissionProfile: "read" as const,
       dependsOn: [],
     };
     const decision = interactionDecisionSchema.parse({
       mode: "delegate",
-      modelProfile: "main",
       userMessage: null,
       statusMessage: null,
       tasks: [task],
@@ -326,7 +329,6 @@ describeDatabase("Step 5 PostgreSQL orchestration", () => {
     const committed = await orchestration.commitDelegation({
       payload,
       decision,
-      selectedModelProfile: "main",
       promptVersion: "1:fixture",
       tasks: [{ task, instructionsCiphertext: "cipher:instructions" }],
       rootLogicalTaskIds: [task.id],

@@ -15,10 +15,10 @@ The agent combines:
 - Photon Spectrum Cloud for iMessage delivery over a persistent gRPC stream.
 - A terse interaction agent that talks to the user and decides whether work can be answered directly.
 - Named Codex execution agents that perform repository, research, planning, and skill-backed work.
-- Configurable GPT-5.6 Luna, Terra, and Sol model profiles.
+- Account-aware deployment model selection from the live Codex catalog.
 - PostgreSQL for raw conversation state, job coordination, auditability, approvals, and restart recovery.
 - Supermemory for durable semantic facts and user profile recall.
-- Railway for guided project deployment and private dashboard-managed provider enrollment.
+- Railway for guided project deployment and public dashboard-managed owner/provider enrollment.
 
 The first release is deliberately **single-owner and private**. A public multi-tenant agent would require a different authentication, credential-isolation, billing, abuse-prevention, and worker architecture.
 
@@ -83,13 +83,14 @@ A team that wants to fork the starter for a customer or employee use case and ad
 ### Journey A: first deployment
 
 1. User creates one Railway application service, one PostgreSQL 18 service, and one persistent volume.
-2. User connects this repository and configures the required owner, storage, database, encryption, and authentication variables.
-3. The service starts live but not ready and exposes the operator dashboard.
-4. User completes Photon setup from the dashboard.
-5. In ChatGPT mode, user completes the dashboard-managed Codex device-login flow; API-key mode uses the configured service secret.
-6. The runtime rechecks authentication and capabilities without accepting messages prematurely.
-7. `/readyz` becomes healthy only after every critical component reports ready.
-9. User sends `hello` from an authorized iMessage address and gets an onboarding reply.
+2. User connects this repository and configures the required Railway infrastructure variables.
+3. The service starts live but not ready and exposes the public setup dashboard.
+4. User enters the owner phone and completes Photon setup from the dashboard.
+5. In ChatGPT mode, user connects ChatGPT through the dashboard device-login flow; API-key mode uses the configured service secret.
+6. In ChatGPT mode, user confirms or changes the deployment model and reasoning effort under **Advanced**.
+7. The runtime rechecks owner, authentication, capabilities, database, queue, storage, and Spectrum readiness without accepting messages prematurely.
+8. `/readyz` becomes healthy only after every critical component reports ready.
+9. User sends `hello` from the configured owner phone to the Photon-assigned number and gets an onboarding reply.
 
 **Success condition:** a fresh deploy can reach a useful first response without editing source code.
 
@@ -162,7 +163,7 @@ A team that wants to fork the starter for a customer or employee use case and ad
 ### 9.2 Sender authorization
 
 - Normalize phone numbers to E.164 when possible and lowercase email handles.
-- Match inbound senders against `AGENT_OWNER_HANDLES` or a database allowlist.
+- Match inbound senders against the active database identity; use legacy owner environment values only for one-time migration when no database owner exists.
 - Deny tool execution for unknown senders before any model call.
 - Default unknown-sender behavior is silence; optional pairing mode may send a limited pairing instruction.
 - Group messages require both sender authorization and mention/reply gating.
@@ -198,20 +199,19 @@ A team that wants to fork the starter for a customer or employee use case and ad
 - Never send an iMessage directly; only the interaction/synthesis path may produce outbound content.
 - Store artifacts in the configured workspace or object-storage extension, not inside model output.
 
-### 9.6 Model routing
+### 9.6 Account-aware model selection
 
-- Provide named profiles: `fast`, `main`, `balanced`, `hard`, and `deep`.
-- Default mapping:
-  - `fast`: GPT-5.6 Luna, medium effort.
-  - `main`: GPT-5.6 Luna, high effort.
-  - `balanced`: GPT-5.6 Terra, high effort.
-  - `hard`: GPT-5.6 Luna, max effort.
-  - `deep`: GPT-5.6 Sol, max effort.
-- All model names and efforts are environment-configurable.
-- `/model auto|fast|main|balanced|hard|deep` controls the current space.
-- Auto-routing is deterministic first and model-assisted only for ambiguous cases.
-- Startup probes the installed Codex CLI/SDK for configured model/effort support.
-- Unsupported `max` must not be silently changed to `xhigh`; production either fails with a clear diagnostic or uses an explicitly enabled fallback.
+- Store GPT-5.6 Luna / High as the default deployment preference.
+- Display `planType` from the Codex account APIs, but use live `model/list`
+  results—not the plan label—as the model/effort entitlement authority.
+- Let the owner change one deployment-wide preference under dashboard
+  **Advanced**; `/model` only displays the current pair.
+- Snapshot the effective pair when a chain is created and use it for planning,
+  every task, and synthesis.
+- If the preference is unavailable, use Codex's advertised default pair while
+  preserving the preference and explaining the fallback.
+- Probe only the effective or newly requested pair. Do not route by task
+  complexity, escalate after failure, or retry multiple pairs during a turn.
 
 ### 9.7 PostgreSQL state and queue
 
@@ -238,8 +238,8 @@ A team that wants to fork the starter for a customer or employee use case and ad
 V1 commands:
 
 - `/help` — show concise capabilities and safety limits.
-- `/status` — show auth, transport, queue, memory, active jobs, and selected model profile.
-- `/model <profile>` — set per-space model mode.
+- `/status` — show auth, transport, queue, memory, active jobs, and selected deployment model.
+- `/model` — display the deployment model and point to dashboard Advanced.
 - `/cancel` — cancel active interruptible chains for the space.
 - `/new` — start a fresh interaction thread while preserving owner memory.
 - `/agents` — list named execution agents and current status.
@@ -262,7 +262,7 @@ Commands are parsed in code before the model.
 ### 9.11 Health and observability
 
 - `/healthz`: process liveness only; no secrets or dependency details.
-- `/readyz`: database, migrations, pg-boss, Spectrum connection, Codex auth/capability probe, persistent volume, and required Supermemory configuration.
+- `/readyz`: owner identity, database, migrations, pg-boss, Spectrum connection, Codex auth/capability probe, and persistent-volume storage; optional Supermemory may be disabled or degraded.
 - Structured logs with correlation IDs for message, chain, task, job, and outbound batch.
 - Redact sender handles, message bodies, secrets, authorization tokens, and Codex credentials by default.
 - Track latency, task success, cancellation, retries, model profile, token usage where available, memory hits, and approval outcomes.

@@ -1,6 +1,5 @@
 {
   "mode": "delegate",
-  "modelProfile": "main",
   "userMessage": null,
   "statusMessage": "I’m checking the repository and the current provider guidance now.",
   "tasks": [
@@ -10,7 +9,6 @@
       "purpose": "Establish the local failure cause",
       "instructions": "Inspect the approved repository and return the root cause with evidence.",
       "workspaceBinding": "primary-repo",
-      "modelProfile": "main",
       "permissionProfile": "read",
       "dependsOn": []
     },
@@ -20,7 +18,6 @@
       "purpose": "Verify the current provider contract",
       "instructions": "Read the allowed official provider source and return only relevant contract evidence.",
       "workspaceBinding": "research",
-      "modelProfile": "balanced",
       "permissionProfile": "network-read",
       "dependsOn": []
     },
@@ -30,7 +27,6 @@
       "purpose": "Compare local behavior with the provider contract",
       "instructions": "Use the two bounded findings to identify the material mismatch.",
       "workspaceBinding": "primary-repo",
-      "modelProfile": "main",
       "permissionProfile": "read",
       "dependsOn": ["inspect-repository", "check-guidance"]
     }

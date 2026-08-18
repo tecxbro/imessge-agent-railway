@@ -215,10 +215,20 @@ export async function handleSpectrumMessage(
     return normalized.ignored;
   }
 
-  return options.authorizeAndIngest.authorizeAndIngest(
+  const disposition = await options.authorizeAndIngest.authorizeAndIngest(
     normalized.inbound,
     options.signal === undefined ? {} : { signal: options.signal },
   );
+
+  if (disposition !== "unauthorized") {
+    // Photon delivery does not automatically mean the agent has read the
+    // message. Acknowledge it only after authorization and successful durable
+    // handling so the sender sees Read without leaking activity to rejected
+    // senders or claiming a failed ingest was seen.
+    await message.read();
+  }
+
+  return disposition;
 }
 
 export async function runSpectrumMessageLoop(

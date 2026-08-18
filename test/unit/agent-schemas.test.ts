@@ -67,12 +67,14 @@ describe("model output contracts", () => {
       purpose: "Inspect the runtime failure.",
       instructions: "Return the root cause with evidence.",
       workspaceBinding: null,
-      modelProfile: "main",
       permissionProfile: "read",
       dependsOn: [],
     };
 
     expect(executionTaskSchema.safeParse(task).success).toBe(true);
+    expect(
+      executionTaskSchema.safeParse({ ...task, modelProfile: "main" }).success,
+    ).toBe(false);
     const { workspaceBinding: _workspaceBinding, ...withoutBinding } = task;
     expect(executionTaskSchema.safeParse(withoutBinding).success).toBe(false);
   });
@@ -90,11 +92,16 @@ describe("model output contracts", () => {
   });
 
   it("accepts representative valid interaction and execution JSON fixtures", () => {
+    const interaction = readFixture("interaction-valid.json");
     expect(
-      interactionDecisionSchema.safeParse(
-        readFixture("interaction-valid.json"),
-      ).success,
+      interactionDecisionSchema.safeParse(interaction).success,
     ).toBe(true);
+    expect(
+      interactionDecisionSchema.safeParse({
+        ...(interaction as Record<string, unknown>),
+        modelProfile: "deep",
+      }).success,
+    ).toBe(false);
     expect(
       executionResultSchema.safeParse(readFixture("execution-valid.json"))
         .success,
@@ -126,7 +133,6 @@ describe("model output contracts", () => {
   it("rejects duplicate IDs, cycles, and graphs deeper than three tasks", () => {
     const base = {
       mode: "delegate",
-      modelProfile: "main",
       userMessage: null,
       statusMessage: null,
       waitForTasks: true,
@@ -138,7 +144,6 @@ describe("model output contracts", () => {
       purpose: `Complete ${id}`,
       instructions: `Return evidence for ${id}.`,
       workspaceBinding: null,
-      modelProfile: "main",
       permissionProfile: "read",
       dependsOn,
     });

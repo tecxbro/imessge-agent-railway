@@ -17,7 +17,8 @@ import {
   type CodexThreadRepository,
   type StoredCodexThread,
 } from "../../src/agent/thread-store.js";
-import { DEFAULT_MODEL_PROFILES } from "../../src/config/model-profiles.js";
+
+const modelProfile = { model: "gpt-5.6-luna", effort: "high" } as const;
 
 const temporaryDirectories: string[] = [];
 
@@ -86,7 +87,6 @@ function task(workspaceBinding = "workspace") {
     purpose: "Inspect one repository.",
     instructions: "Return a bounded result.",
     workspaceBinding,
-    modelProfile: "main",
     permissionProfile: "workspace-write",
     dependsOn: [],
   });
@@ -106,7 +106,7 @@ describe("bounded execution runtime", () => {
       ownerId: "00000000-0000-4000-8000-000000000001",
       maximumPermissionProfile: "workspace-write",
       task: task(),
-      modelProfile: DEFAULT_MODEL_PROFILES.main,
+      modelProfile,
       workspaceRoot: root,
       policySections: [
         {
@@ -140,7 +140,7 @@ describe("bounded execution runtime", () => {
         ownerId: "00000000-0000-4000-8000-000000000001",
         maximumPermissionProfile: "workspace-write",
         task: task("escaped"),
-        modelProfile: DEFAULT_MODEL_PROFILES.main,
+        modelProfile,
         workspaceRoot: root,
         policySections: [
           {
@@ -172,7 +172,7 @@ describe("bounded execution runtime", () => {
         ownerId: "00000000-0000-4000-8000-000000000001",
         maximumPermissionProfile: "workspace-write",
         task: task(),
-        modelProfile: DEFAULT_MODEL_PROFILES.main,
+        modelProfile,
         workspaceRoot: root,
         policySections: [
           {

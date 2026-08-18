@@ -118,19 +118,21 @@ describe("PostgreSQL timeout recovery", () => {
     const ready = await fetch(`http://127.0.0.1:${address.port}/readyz`);
     expect(ready.status).toBe(503);
     const body = (await ready.json()) as {
-      actions: string[];
-      components: Record<string, { code?: string; state: string }>;
       ready: boolean;
+      status: "ready" | "not_ready";
     };
-    expect(body).toMatchObject({
-      ready: false,
+    expect(body).toMatchObject({ status: "not_ready", ready: false });
+    const internalReadiness = service.readiness.snapshot(
+      service.spectrumReadiness.snapshot(),
+    );
+    expect(internalReadiness).toMatchObject({
       components: {
         database: { code: "DATABASE_UNAVAILABLE", state: "failed" },
         migrations: { state: "unknown" },
         queue: { state: "unknown" },
       },
     });
-    expect(body.actions).toEqual([
+    expect(internalReadiness.actions).toEqual([
       expect.stringContaining("Restore PostgreSQL connectivity"),
     ]);
     expect(JSON.stringify(body)).not.toContain("do-not-expose");

@@ -1,6 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 
-import { and, eq, isNull, notInArray } from "drizzle-orm";
+import { and, asc, eq, isNull, ne } from "drizzle-orm";
 
 import type { AuthorizedSenderContext } from "../../security/authorize-sender.js";
 import { fingerprintSenderHandle } from "../../security/authorize-sender.js";
@@ -17,7 +17,6 @@ import {
 
 export interface OperationalRepositoryOptions {
   deploymentId: string;
-  ownerHandles: readonly string[];
   fingerprintKey: string;
   encrypt(plaintext: string): Promise<string> | string;
   decrypt(ciphertext: string): Promise<string> | string;
@@ -59,8 +58,8 @@ export class OperationalRepository {
     private readonly options: OperationalRepositoryOptions,
   ) {}
 
-  /** Seeds the single private owner and makes the current env allowlist authoritative. */
-  public async provisionDeployment(): Promise<void> {
+  /** Seeds the deployment and its single primary owner without authorizing a channel. */
+  public async ensureDeployment(): Promise<void> {
     const ownerId = stableUuid(`${this.options.deploymentId}:primary-owner`);
     await this.database.transaction(async (transaction) => {
       await transaction
@@ -74,71 +73,130 @@ export class OperationalRepository {
         .onConflictDoUpdate({
           target: deployments.id,
           set: {
-            defaultModelProfile: "main",
             updatedAt: new Date(),
           },
         });
-      await transaction
-        .insert(owners)
-        .values({
-          id: ownerId,
-          deploymentId: this.options.deploymentId,
-          displayName: "Owner",
-          timezone: "UTC",
-          status: "active",
-        })
-        .onConflictDoNothing();
-
-      const fingerprints: string[] = [];
-      for (const handle of this.options.ownerHandles) {
-        const fingerprint = fingerprintSenderHandle(
-          this.options.deploymentId,
-          handle,
-          this.options.fingerprintKey,
-        );
-        fingerprints.push(fingerprint);
+      const [existingOwner] = await transaction
+        .select({ id: owners.id })
+        .from(owners)
+        .where(eq(owners.deploymentId, this.options.deploymentId))
+        .orderBy(asc(owners.createdAt))
+        .limit(1);
+      if (existingOwner === undefined) {
         await transaction
-          .insert(channelIdentities)
+          .insert(owners)
           .values({
-            id: stableUuid(`${this.options.deploymentId}:identity:${fingerprint}`),
+            id: ownerId,
             deploymentId: this.options.deploymentId,
-            ownerId,
-            platform: "imessage",
-            normalizedHandleCiphertext: await this.options.encrypt(handle),
-            handleFingerprint: fingerprint,
-            role: "owner",
-            verifiedAt: new Date(),
-            revokedAt: null,
+            displayName: "Owner",
+            timezone: "UTC",
+            status: "active",
           })
-          .onConflictDoUpdate({
-            target: [
-              channelIdentities.deploymentId,
-              channelIdentities.platform,
-              channelIdentities.handleFingerprint,
-            ],
-            set: {
-              ownerId,
-              normalizedHandleCiphertext: await this.options.encrypt(handle),
-              role: "owner",
-              verifiedAt: new Date(),
-              revokedAt: null,
-              updatedAt: new Date(),
-            },
-          });
+          .onConflictDoNothing();
       }
+    });
+  }
+
+  public async replaceOwnerPhoneNumber(phoneNumber: string): Promise<void> {
+    if (!/^\+[1-9]\d{7,14}$/u.test(phoneNumber)) {
+      throw new Error("Owner phone number must be normalized E.164.");
+    }
+    await this.database.transaction(async (transaction) => {
+      const now = new Date();
+      const [owner] = await transaction
+        .select({ id: owners.id })
+        .from(owners)
+        .where(eq(owners.deploymentId, this.options.deploymentId))
+        .orderBy(asc(owners.createdAt))
+        .limit(1);
+      if (owner === undefined) {
+        throw new Error(
+          "The deployment owner row is missing; run ensureDeployment first.",
+        );
+      }
+      const ownerId = owner.id;
+      const fingerprint = fingerprintSenderHandle(
+        this.options.deploymentId,
+        phoneNumber,
+        this.options.fingerprintKey,
+      );
+      const ciphertext = await this.options.encrypt(phoneNumber);
+
+      await transaction
+        .insert(channelIdentities)
+        .values({
+          id: stableUuid(`${this.options.deploymentId}:identity:${fingerprint}`),
+          deploymentId: this.options.deploymentId,
+          ownerId,
+          platform: "imessage",
+          normalizedHandleCiphertext: ciphertext,
+          handleFingerprint: fingerprint,
+          role: "owner",
+          verifiedAt: now,
+          revokedAt: null,
+        })
+        .onConflictDoUpdate({
+          target: [
+            channelIdentities.deploymentId,
+            channelIdentities.platform,
+            channelIdentities.handleFingerprint,
+          ],
+          set: {
+            ownerId,
+            normalizedHandleCiphertext: ciphertext,
+            role: "owner",
+            verifiedAt: now,
+            revokedAt: null,
+            updatedAt: now,
+          },
+        });
 
       await transaction
         .update(channelIdentities)
-        .set({ revokedAt: new Date(), updatedAt: new Date() })
+        .set({ revokedAt: now, updatedAt: now })
         .where(
           and(
             eq(channelIdentities.deploymentId, this.options.deploymentId),
             eq(channelIdentities.platform, "imessage"),
             eq(channelIdentities.role, "owner"),
-            notInArray(channelIdentities.handleFingerprint, fingerprints),
+            isNull(channelIdentities.revokedAt),
+            ne(channelIdentities.handleFingerprint, fingerprint),
           ),
         );
     });
+  }
+
+  public async readOwnerPhoneNumber(): Promise<string | undefined> {
+    const rows = await this.database
+      .select({
+        ciphertext: channelIdentities.normalizedHandleCiphertext,
+      })
+      .from(channelIdentities)
+      .innerJoin(owners, eq(channelIdentities.ownerId, owners.id))
+      .where(
+        and(
+          eq(channelIdentities.deploymentId, this.options.deploymentId),
+          eq(channelIdentities.platform, "imessage"),
+          eq(channelIdentities.role, "owner"),
+          isNull(channelIdentities.revokedAt),
+          eq(owners.status, "active"),
+        ),
+      )
+      .limit(2);
+    if (rows.length > 1) {
+      throw new Error(
+        "Multiple active owner phone identities violate the deployment invariant.",
+      );
+    }
+    const row = rows[0];
+    if (row === undefined) {
+      return undefined;
+    }
+    const phoneNumber = await this.options.decrypt(row.ciphertext);
+    if (!/^\+[1-9]\d{7,14}$/u.test(phoneNumber)) {
+      throw new Error("The active owner identity is not valid E.164 data.");
+    }
+    return phoneNumber;
   }
 
   public async findInternalSpaceId(

@@ -18,9 +18,15 @@ import {
   approvals,
   chains,
   executionTasks,
+  deployments,
   messages,
   outboundBatches,
+  spaces,
 } from "../schema.js";
+import {
+  modelSelectionSchema,
+  type ModelSelectionState,
+} from "../../agent/model-selection.js";
 
 const ACTIVE_CHAIN_STATES = [
   "queued",
@@ -116,12 +122,45 @@ export class ChainRepository {
       const version = (versionRow?.latest ?? 0) + 1;
       const chainId = randomUUID();
 
+      const [selectionRow] = await transaction
+        .select({
+          modelId: deployments.effectiveModelId,
+          reasoningEffort: deployments.effectiveReasoningEffort,
+          source: deployments.modelSelectionState,
+        })
+        .from(spaces)
+        .innerJoin(deployments, eq(deployments.id, spaces.deploymentId))
+        .where(eq(spaces.id, spaceId))
+        .limit(1);
+      if (
+        selectionRow === undefined ||
+        selectionRow.modelId === null ||
+        selectionRow.reasoningEffort === null ||
+        (selectionRow.source !== "preferred" &&
+          selectionRow.source !== "fallback")
+      ) {
+        throw new Error(
+          "Cannot create a message chain until an effective Codex model is available. Refresh account model settings and retry.",
+        );
+      }
+      const selection = modelSelectionSchema.parse({
+        modelId: selectionRow.modelId,
+        reasoningEffort: selectionRow.reasoningEffort,
+      });
+
       await transaction.insert(chains).values({
         id: chainId,
         spaceId,
         version,
         state: "queued",
         chainStartedAt: startedAt,
+        modelProfile: "main",
+        modelId: selection.modelId,
+        reasoningEffort: selection.reasoningEffort,
+        modelSelectionSource: selectionRow.source as Extract<
+          ModelSelectionState,
+          "preferred" | "fallback"
+        >,
       });
 
       const undrainedIds = undrained.map((row) => row.id);

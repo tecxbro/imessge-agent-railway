@@ -8,21 +8,74 @@ import {
   SpectrumReadiness,
   type ReadinessComponent,
 } from "../../src/http/readiness.js";
+import {
+  createDeploymentIdentityController,
+  type DeploymentIdentityController,
+  type DeploymentIdentityStatus,
+} from "../../src/runtime/deployment-identity.js";
 import { startHealthServer, type HealthServer } from "../../src/http/server.js";
 import type { PhotonSetupController } from "../../src/transport/photon-setup.js";
 
 let health: HealthServer | undefined;
+
+const chatGptCapabilityMethods = {
+  capabilities: () => ({
+    state: "unavailable" as const,
+    planType: null,
+    models: [],
+    refreshedAt: null,
+  }),
+  refreshCapabilities: async () => ({
+    state: "unavailable" as const,
+    planType: null,
+    models: [],
+    refreshedAt: null,
+  }),
+  onCapabilitiesChanged: () => () => undefined,
+};
 
 afterEach(async () => {
   await health?.close();
   health = undefined;
 });
 
+function deploymentIdentity(
+  initialStatus: DeploymentIdentityStatus = {
+    state: "configured",
+    maskedPhoneNumber: "••••••4567",
+  },
+): DeploymentIdentityController {
+  let status = initialStatus;
+  return {
+    initialize: async () => status,
+    status: () => ({ ...status }),
+    configureOwner: async () => {
+      status = { state: "configured", maskedPhoneNumber: "••••••0123" };
+      return status;
+    },
+    readOwnerPhoneNumber: async () =>
+      status.state === "configured" ? "+15551234567" : undefined,
+    onConfigured: () => () => undefined,
+  };
+}
+
+function publicMutation(base: string): RequestInit {
+  return {
+    method: "POST",
+    headers: {
+      origin: base,
+      "content-type": "application/json",
+    },
+    body: "{}",
+  };
+}
+
 function markCriticalComponentsReady(readiness: ReadinessRegistry): void {
   for (const component of [
     "configuration",
     "database",
     "migrations",
+    "ownerIdentity",
     "queue",
     "codexAuth",
     "codexCapabilities",
@@ -43,9 +96,11 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity({ state: "not_configured" }),
       spectrum,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
     const root = await fetch(`http://127.0.0.1:${address.port}/`, {
       redirect: "manual",
@@ -53,9 +108,7 @@ describe("health and readiness endpoints", () => {
     expect(root.status).toBe(302);
     expect(root.headers.get("location")).toBe("/agent/dashboard");
 
-    const deployment = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const deployment = await fetch(`${base}/agent/dashboard`);
     expect(deployment.status).toBe(200);
     expect(deployment.headers.get("content-security-policy")).toContain(
       "default-src 'none'",
@@ -63,9 +116,10 @@ describe("health and readiness endpoints", () => {
     expect(deployment.headers.get("x-frame-options")).toBe("DENY");
     const deploymentPage = await deployment.text();
     expect(deploymentPage).toContain("iMessage Agent");
-    expect(deploymentPage).toContain("Photon");
-    expect(deploymentPage).toContain("Not connected");
-    expect(deploymentPage).toContain("Authenticate with Photon");
+    expect(deploymentPage).toContain("Your phone number");
+    expect(deploymentPage).toContain("Not configured");
+    expect(deploymentPage).toContain("Save and continue");
+    expect(deploymentPage).not.toContain("Authenticate with Photon");
     expect(deploymentPage).toContain("Photon PolySans");
     expect(deploymentPage).toContain('src="/agent/photon-logo.png"');
     expect(deploymentPage).toContain('href="https://photon.codes"');
@@ -101,18 +155,156 @@ describe("health and readiness endpoints", () => {
     expect(live.status).toBe(200);
     await expect(live.json()).resolves.toEqual({ status: "ok" });
 
-    const ready = await fetch(`http://127.0.0.1:${address.port}/readyz`);
+    const ready = await fetch(`${base}/readyz`);
     expect(ready.status).toBe(503);
-    const body = (await ready.json()) as {
-      actions: string[];
-      ready: boolean;
-      components: Record<string, { state: string }>;
-    };
-    expect(body.ready).toBe(false);
-    expect(body.components["codexAuth"]?.state).toBe("missing");
-    expect(body.actions).toEqual([
-      expect.stringContaining("agent dashboard"),
-    ]);
+    await expect(ready.json()).resolves.toMatchObject({
+      status: "not_ready",
+      ready: false,
+      components: {
+        codexAuth: { state: "missing", code: "CODEX_AUTH_MISSING" },
+      },
+      actions: [expect.stringContaining("agent dashboard")],
+    });
+  });
+
+  it("validates and persists dashboard owner setup while returning only a masked number", async () => {
+    const readiness = new ReadinessRegistry();
+    const spectrum = new SpectrumReadiness();
+    let storedPhoneNumber: string | undefined;
+    const identity = createDeploymentIdentityController();
+    identity.bindRepository({
+      async replaceOwnerPhoneNumber(phoneNumber) {
+        storedPhoneNumber = phoneNumber;
+      },
+      async readOwnerPhoneNumber() {
+        return storedPhoneNumber;
+      },
+    });
+    await identity.initialize();
+    health = await startHealthServer({
+      port: 0,
+      host: "127.0.0.1",
+      readiness,
+      deploymentIdentity: identity,
+      spectrum,
+    });
+    const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const initial = await fetch(`${base}/api/setup/owner/status`);
+    await expect(initial.json()).resolves.toEqual({
+      state: "not_configured",
+    });
+
+    const extra = await fetch(`${base}/api/setup/owner`, {
+      ...publicMutation(base),
+      body: JSON.stringify({
+        phoneNumber: "+14155550123",
+        unexpected: true,
+      }),
+    });
+    expect(extra.status).toBe(400);
+    await expect(extra.json()).resolves.toEqual({ error: "INVALID_REQUEST" });
+
+    const extraDashboardField = await fetch(`${base}/api/setup/owner`, {
+      ...publicMutation(base),
+      body: JSON.stringify({
+        countryCode: "US",
+        phoneNumber: "4155550123",
+        unexpected: true,
+      }),
+    });
+    expect(extraDashboardField.status).toBe(400);
+    await expect(extraDashboardField.json()).resolves.toEqual({
+      error: "INVALID_REQUEST",
+    });
+
+    const invalid = await fetch(`${base}/api/setup/owner`, {
+      ...publicMutation(base),
+      body: JSON.stringify({ phoneNumber: "415-555-0123" }),
+    });
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toEqual({
+      error: "OWNER_PHONE_NUMBER_INVALID",
+    });
+
+    const mismatchedCountry = await fetch(`${base}/api/setup/owner`, {
+      ...publicMutation(base),
+      body: JSON.stringify({
+        countryCode: "GB",
+        phoneNumber: "+33 1 42 68 53 00",
+      }),
+    });
+    expect(mismatchedCountry.status).toBe(400);
+    await expect(mismatchedCountry.json()).resolves.toEqual({
+      error: "OWNER_PHONE_NUMBER_INVALID",
+    });
+
+    const configured = await fetch(`${base}/api/setup/owner`, {
+      ...publicMutation(base),
+      body: JSON.stringify({
+        countryCode: "GB",
+        phoneNumber: "020 7183 8750",
+      }),
+    });
+    const configuredBody = await configured.text();
+    expect(configured.status).toBe(200);
+    expect(JSON.parse(configuredBody)).toEqual({
+      state: "configured",
+      maskedPhoneNumber: "••••••8750",
+    });
+    expect(configuredBody).not.toContain("+442071838750");
+    expect(storedPhoneNumber).toBe("+442071838750");
+
+    const status = await fetch(`${base}/api/setup/owner/status`);
+    const statusBody = await status.text();
+    expect(JSON.parse(statusBody)).toEqual({
+      state: "configured",
+      maskedPhoneNumber: "••••••8750",
+    });
+    expect(statusBody).not.toContain("+442071838750");
+
+    const dashboard = await fetch(`${base}/agent/dashboard`);
+    const html = await dashboard.text();
+    expect(html).toContain("••••••8750");
+    expect(html).not.toContain("+442071838750");
+  });
+
+  it("retains the legacy exact E.164 owner request", async () => {
+    const readiness = new ReadinessRegistry();
+    const spectrum = new SpectrumReadiness();
+    let storedPhoneNumber: string | undefined;
+    const identity = createDeploymentIdentityController();
+    identity.bindRepository({
+      async replaceOwnerPhoneNumber(phoneNumber) {
+        storedPhoneNumber = phoneNumber;
+      },
+      async readOwnerPhoneNumber() {
+        return storedPhoneNumber;
+      },
+    });
+    await identity.initialize();
+    health = await startHealthServer({
+      port: 0,
+      host: "127.0.0.1",
+      readiness,
+      deploymentIdentity: identity,
+      spectrum,
+    });
+    const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
+
+    const configured = await fetch(`${base}/api/setup/owner`, {
+      ...publicMutation(base),
+      body: JSON.stringify({ phoneNumber: "+14155550123" }),
+    });
+
+    expect(configured.status).toBe(200);
+    await expect(configured.json()).resolves.toEqual({
+      state: "configured",
+      maskedPhoneNumber: "••••••0123",
+    });
+    expect(storedPhoneNumber).toBe("+14155550123");
   });
 
   it("reports ready only when every critical component is ready", () => {
@@ -154,6 +346,7 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
       deploymentPage: {
         authMode: "api_key",
@@ -163,15 +356,21 @@ describe("health and readiness endpoints", () => {
       photonSetup,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
-    const response = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const response = await fetch(`${base}/agent/dashboard`);
     const page = await response.text();
     expect(page).toContain("✓ Photon connected");
     expect(page).toContain("Your number:");
     expect(page).toContain("+16285550123");
     expect(page).not.toContain("Supermemory");
+
+    const ready = await fetch(`${base}/readyz`);
+    expect(ready.status).toBe(200);
+    await expect(ready.json()).resolves.toMatchObject({
+      status: "ready",
+      ready: true,
+    });
   });
 
   it("shows ChatGPT device login after Photon connects", async () => {
@@ -189,6 +388,7 @@ describe("health and readiness endpoints", () => {
       state: "not_connected" as const,
     } as ReturnType<ChatGptSetupController["status"]>;
     const chatgptSetup = {
+      ...chatGptCapabilityMethods,
       initialize: async () => chatGptStatus,
       status: () => chatGptStatus,
       start: async () => {
@@ -206,6 +406,7 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
       deploymentPage: {
         authMode: "chatgpt",
@@ -216,28 +417,22 @@ describe("health and readiness endpoints", () => {
       chatgptSetup,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
-    const dashboard = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const dashboard = await fetch(`${base}/agent/dashboard`);
     const initialPage = await dashboard.text();
     expect(initialPage).toContain("ChatGPT");
     expect(initialPage).toContain("Not connected");
     expect(initialPage).toContain("Connect ChatGPT");
 
     const start = await fetch(
-      `http://127.0.0.1:${address.port}/api/setup/chatgpt/start`,
-      {
-        method: "POST",
-        headers: { "x-agent-setup": "dashboard" },
-      },
+      `${base}/api/setup/chatgpt/start`,
+      publicMutation(base),
     );
     expect(start.status).toBe(202);
     await expect(start.json()).resolves.toEqual(chatGptStatus);
 
-    const devicePage = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const devicePage = await fetch(`${base}/agent/dashboard`);
     const deviceHtml = await devicePage.text();
     expect(deviceHtml).toContain("https://auth.openai.com/codex/device");
     expect(deviceHtml).toContain("ABCD-1234");
@@ -258,6 +453,7 @@ describe("health and readiness endpoints", () => {
       start: async () => ({ state: "connected" as const }),
     } satisfies PhotonSetupController;
     const chatgptSetup = {
+      ...chatGptCapabilityMethods,
       initialize: async () => ({
         state: "failed" as const,
         code: "CHATGPT_APP_SERVER_UNAVAILABLE" as const,
@@ -274,6 +470,7 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
       deploymentPage: {
         authMode: "chatgpt",
@@ -284,10 +481,9 @@ describe("health and readiness endpoints", () => {
       chatgptSetup,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
-    const response = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const response = await fetch(`${base}/agent/dashboard`);
     const page = await response.text();
     expect(page).toContain("ChatGPT");
     expect(page).toContain("✓ Connected");
@@ -313,6 +509,7 @@ describe("health and readiness endpoints", () => {
       start: async () => ({ state: "connected" as const }),
     } satisfies PhotonSetupController;
     const chatgptSetup = {
+      ...chatGptCapabilityMethods,
       initialize: async () => ({ state: "connected" as const }),
       status: () => ({ state: "connected" as const }),
       start: async () => ({ state: "connected" as const }),
@@ -323,6 +520,7 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
       deploymentPage: {
         authMode: "chatgpt",
@@ -333,10 +531,9 @@ describe("health and readiness endpoints", () => {
       chatgptSetup,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
-    const response = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const response = await fetch(`${base}/agent/dashboard`);
     const page = await response.text();
     expect(page).toContain("Your iMessage Agent");
     expect(page).toContain("✓ Photon connected");
@@ -346,11 +543,14 @@ describe("health and readiness endpoints", () => {
     expect(page).toContain("+16285550123");
     expect(page).toContain("Your agent is ready.");
     expect(page).toContain("Text it to get started.");
+    expect(page).toContain('<details id="advanced-settings"');
+    expect(page).toContain("ChatGPT plan");
+    expect(page).toContain('id="model-select"');
+    expect(page).toContain('id="effort-select"');
+    expect(page).toContain("Use Luna High");
     expect(page).not.toContain('role="progressbar"');
 
-    const script = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard.js`,
-    );
+    const script = await fetch(`${base}/agent/dashboard.js`);
     const javascript = await script.text();
     expect(javascript).toContain('fetch("/readyz"');
     expect(javascript).toContain("dataset.ready");
@@ -369,6 +569,7 @@ describe("health and readiness endpoints", () => {
       start: async () => ({ state: "connected" as const }),
     } satisfies PhotonSetupController;
     const chatgptSetup = {
+      ...chatGptCapabilityMethods,
       initialize: async () => ({
         state: "failed" as const,
         code: "CHATGPT_APP_SERVER_UNAVAILABLE" as const,
@@ -388,6 +589,7 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
       deploymentPage: {
         authMode: "chatgpt",
@@ -398,17 +600,16 @@ describe("health and readiness endpoints", () => {
       chatgptSetup,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
-    const response = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const response = await fetch(`${base}/agent/dashboard`);
     const page = await response.text();
     expect(page).toContain("✓ ChatGPT connected");
     expect(page).toContain("Your agent is ready.");
     expect(page).not.toContain("CHATGPT_APP_SERVER_UNAVAILABLE");
   });
 
-  it("exposes the Photon setup start and status API without credentials", async () => {
+  it("preserves Photon setup start and public status behavior", async () => {
     const readiness = new ReadinessRegistry();
     const spectrum = new SpectrumReadiness();
     let status = {
@@ -430,14 +631,16 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
       photonSetup,
     });
     const address = health.server.address() as AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
 
     const start = await fetch(
-      `http://127.0.0.1:${address.port}/api/setup/photon/start`,
-      { method: "POST" },
+      `${base}/api/setup/photon/start`,
+      publicMutation(base),
     );
     expect(start.status).toBe(202);
     await expect(start.json()).resolves.toMatchObject({
@@ -445,14 +648,10 @@ describe("health and readiness endpoints", () => {
       userCode: "ABCD-EFGH",
     });
 
-    const current = await fetch(
-      `http://127.0.0.1:${address.port}/api/setup/photon/status`,
-    );
+    const current = await fetch(`${base}/api/setup/photon/status`);
     await expect(current.json()).resolves.toEqual(status);
 
-    const dashboard = await fetch(
-      `http://127.0.0.1:${address.port}/agent/dashboard`,
-    );
+    const dashboard = await fetch(`${base}/agent/dashboard`);
     const page = await dashboard.text();
     expect(page).toContain("https://app.photon.codes/device");
     expect(page).toContain('data-auth-link="photon"');
@@ -465,6 +664,7 @@ describe("health and readiness endpoints", () => {
       port: 0,
       host: "127.0.0.1",
       readiness,
+      deploymentIdentity: deploymentIdentity(),
       spectrum,
     });
     const address = health.server.address() as AddressInfo;

@@ -35,12 +35,14 @@ async function main(): Promise<void> {
     port: runtime.environment.PORT,
     host: "0.0.0.0",
     bootstrap: runtime.bootstrap,
+    deploymentIdentity: runtime.deploymentIdentity,
     deploymentPage: {
       authMode: runtime.environment.CODEX_AUTH_MODE,
       supermemoryConfigured:
         runtime.environment.SUPERMEMORY_API_KEY !== undefined,
     },
     photonSetup: runtime.photonSetup,
+    modelSettings: runtime.modelSettings,
     ...(runtime.chatgptSetup === undefined
       ? {}
       : { chatgptSetup: runtime.chatgptSetup }),

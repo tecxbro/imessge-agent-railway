@@ -7,12 +7,13 @@ import type {
   ComponentStatus,
   NamedAgentSummary,
 } from "../../commands/handlers.js";
-import type { ModelProfileName } from "../../config/model-profiles.js";
+import { modelSelectionSchema } from "../../agent/model-selection.js";
 import type { Database } from "../client.js";
 import {
   agentThreads,
   chains,
   channelIdentities,
+  deployments,
   executionTasks,
   messages,
   spaces,
@@ -56,17 +57,19 @@ export class CommandRepository implements CommandHandlersDependencies {
     return {
       ...(await this.options.readiness()),
       activeTaskCount: active?.count ?? 0,
-      modelProfile: await this.getModelProfile(context),
+      modelSelection: await this.getModelSelection(context),
     };
   }
 
-  public async getModelProfile(
-    context: CommandContext,
-  ): Promise<ModelProfileName | "auto"> {
+  public async getModelSelection(context: CommandContext) {
     await this.assertOwnerSpace(context);
-    const [space] = await this.database
-      .select({ modelProfile: spaces.modelProfileOverride })
+    const [deployment] = await this.database
+      .select({
+        modelId: deployments.effectiveModelId,
+        reasoningEffort: deployments.effectiveReasoningEffort,
+      })
       .from(spaces)
+      .innerJoin(deployments, eq(deployments.id, spaces.deploymentId))
       .where(
         and(
           eq(spaces.id, context.spaceId),
@@ -74,34 +77,12 @@ export class CommandRepository implements CommandHandlersDependencies {
         ),
       )
       .limit(1);
-    if (space === undefined) {
+    if (deployment === undefined) {
       throw new Error(
         "The command space no longer exists. Rehydrate the Spectrum space before retrying.",
       );
     }
-    return (space.modelProfile as ModelProfileName | null) ?? "auto";
-  }
-
-  public async setModelProfile(
-    context: CommandContext,
-    profile: ModelProfileName | null,
-  ): Promise<void> {
-    await this.assertOwnerSpace(context);
-    const updated = await this.database
-      .update(spaces)
-      .set({ modelProfileOverride: profile, updatedAt: new Date() })
-      .where(
-        and(
-          eq(spaces.id, context.spaceId),
-          eq(spaces.deploymentId, context.deploymentId),
-        ),
-      )
-      .returning({ id: spaces.id });
-    if (updated.length !== 1) {
-      throw new Error(
-        "The model mode could not be stored for this conversation. Reload the space and retry.",
-      );
-    }
+    return modelSelectionSchema.parse(deployment);
   }
 
   public async cancelActive(

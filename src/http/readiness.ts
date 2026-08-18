@@ -27,6 +27,7 @@ export const READINESS_COMPONENTS = [
   "configuration",
   "database",
   "migrations",
+  "ownerIdentity",
   "queue",
   "spectrum",
   "codexAuth",
@@ -68,6 +69,7 @@ const CRITICAL_COMPONENTS: ReadonlySet<ReadinessComponent> = new Set([
   "configuration",
   "database",
   "migrations",
+  "ownerIdentity",
   "queue",
   "spectrum",
   "codexAuth",
@@ -87,6 +89,12 @@ const SAFE_ACTIONS: Readonly<Partial<Record<string, string>>> = {
     "Restore PostgreSQL connectivity before accepting new message execution.",
   MIGRATIONS_PENDING:
     "Run npm run db:migrate with the current release before starting workers.",
+  OWNER_IDENTITY_NOT_CONFIGURED:
+    "Open the public setup dashboard and save the one owner phone number before starting Photon.",
+  OWNER_IDENTITY_MIGRATION_REQUIRED:
+    "Resolve the legacy owner configuration to one E.164 phone number, then save it in the public setup dashboard.",
+  OWNER_IDENTITY_STORAGE_FAILED:
+    "Restore PostgreSQL identity storage, then retry owner setup from the authenticated dashboard.",
   PERSISTENT_STORAGE_INVALID:
     "Verify the persistent disk mount, ownership, and 0700 directory permissions, then restart.",
   SPECTRUM_STREAM_DISCONNECTED:

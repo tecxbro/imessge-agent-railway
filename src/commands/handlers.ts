@@ -1,7 +1,4 @@
-import {
-  MODEL_PROFILE_NAMES,
-  type ModelProfileName,
-} from "../config/model-profiles.js";
+import type { ModelSelection } from "../agent/model-selection.js";
 import type {
   ApprovalActor,
   ApprovalService,
@@ -29,7 +26,7 @@ export interface CommandStatusSnapshot {
   work: ComponentStatus;
   memory: ComponentStatus | "disabled";
   activeTaskCount: number;
-  modelProfile: ModelProfileName | "auto";
+  modelSelection: ModelSelection;
 }
 
 export interface NamedAgentSummary {
@@ -40,13 +37,7 @@ export interface NamedAgentSummary {
 
 export interface CommandHandlersDependencies {
   getStatus(context: CommandContext): Promise<CommandStatusSnapshot>;
-  getModelProfile(
-    context: CommandContext,
-  ): Promise<ModelProfileName | "auto">;
-  setModelProfile(
-    context: CommandContext,
-    profile: ModelProfileName | null,
-  ): Promise<void>;
+  getModelSelection(context: CommandContext): Promise<ModelSelection>;
   cancelActive(context: CommandContext): Promise<{ canceledCount: number }>;
   resetInteractionThread(context: CommandContext): Promise<void>;
   listAgents(context: CommandContext): Promise<readonly NamedAgentSummary[]>;
@@ -57,8 +48,6 @@ export interface CommandResult {
   message: string;
 }
 
-const profiles = new Set<string>(MODEL_PROFILE_NAMES);
-
 function noArguments(
   command: ParsedSlashCommand,
   usage: string,
@@ -66,7 +55,7 @@ function noArguments(
   if (command.args.length === 0) {
     return undefined;
   }
-  return { handled: true, message: `Usage: ${usage}` };
+  return { handled: true, message: `usage: ${usage}` };
 }
 
 function statusLabel(value: ComponentStatus | "disabled"): string {
@@ -94,15 +83,15 @@ function safeDisplayText(value: string, maximum: number): string {
 
 function helpMessage(): string {
   return [
-    "I can answer directly or do bounded work in an approved workspace.",
+    "i can answer directly or do bounded work in an approved workspace",
     "",
     "/status — check service readiness and active work",
-    "/model [auto|fast|main|balanced|hard|deep] — view or set the mode for future turns",
+    "/model — view the deployment model selected in the dashboard",
     "/cancel — cancel active work in this conversation",
     "/new — start a fresh conversation thread while keeping your saved memory",
     "/agents — list your named work contexts",
     "",
-    "External sends, destructive changes, purchases, and permission changes still require exact approval.",
+    "external sends, destructive changes, purchases, and permission changes still require exact approval",
   ].join("\n");
 }
 
@@ -126,47 +115,22 @@ export async function handleSlashCommand(
       return {
         handled: true,
         message: [
-          `Messaging: ${statusLabel(status.messaging)}`,
-          `Sign-in: ${statusLabel(status.signIn)}`,
-          `Work: ${statusLabel(status.work)}${activeTaskCount === 0 ? "" : ` (${activeTaskCount} active)`}`,
-          `Memory: ${statusLabel(status.memory)}`,
-          `Model mode: ${status.modelProfile}`,
+          `messaging: ${statusLabel(status.messaging)}`,
+          `sign-in: ${statusLabel(status.signIn)}`,
+          `work: ${statusLabel(status.work)}${activeTaskCount === 0 ? "" : ` (${activeTaskCount} active)`}`,
+          `memory: ${statusLabel(status.memory)}`,
+          `model: ${formatModelName(status.modelSelection.modelId)} · ${status.modelSelection.reasoningEffort}`,
         ].join("\n"),
       };
     }
     case "model": {
-      if (command.args.length === 0) {
-        const current = await dependencies.getModelProfile(context);
-        return {
-          handled: true,
-          message: `Model mode: ${current}. Available: auto, ${MODEL_PROFILE_NAMES.join(", ")}.`,
-        };
-      }
-      if (command.args.length !== 1) {
-        return {
-          handled: true,
-          message: "Usage: /model [auto|fast|main|balanced|hard|deep]",
-        };
-      }
-      const requested = command.args[0]?.toLowerCase();
-      if (requested === "auto") {
-        await dependencies.setModelProfile(context, null);
-        return {
-          handled: true,
-          message: "Model mode set to auto for future turns.",
-        };
-      }
-      if (requested === undefined || !profiles.has(requested)) {
-        return {
-          handled: true,
-          message: "Unknown model mode. Choose auto, fast, main, balanced, hard, or deep.",
-        };
-      }
-      const profile = requested as ModelProfileName;
-      await dependencies.setModelProfile(context, profile);
+      const current = await dependencies.getModelSelection(context);
       return {
         handled: true,
-        message: `Model mode set to ${profile} for future turns.`,
+        message: [
+          `model: ${formatModelName(current.modelId)} · ${current.reasoningEffort}`,
+          "change it under Advanced in your dashboard",
+        ].join("\n"),
       };
     }
     case "cancel": {
@@ -179,8 +143,8 @@ export async function handleSlashCommand(
         handled: true,
         message:
           canceledCount > 0
-            ? "Canceled the active work in this conversation."
-            : "There’s no active work to cancel in this conversation.",
+            ? "canceled it"
+            : "nothing active to cancel",
       };
     }
     case "new": {
@@ -191,7 +155,7 @@ export async function handleSlashCommand(
       await dependencies.resetInteractionThread(context);
       return {
         handled: true,
-        message: "Started a fresh conversation thread. Your saved memory is unchanged.",
+        message: "started a fresh conversation. saved memory is unchanged",
       };
     }
     case "agents": {
@@ -203,7 +167,7 @@ export async function handleSlashCommand(
       if (agents.length === 0) {
         return {
           handled: true,
-          message: "No named work contexts yet.",
+          message: "no named work contexts yet",
         };
       }
       const rows = agents.map((agent) => {
@@ -216,15 +180,27 @@ export async function handleSlashCommand(
       });
       return {
         handled: true,
-        message: ["Named work contexts:", ...rows].join("\n"),
+        message: ["named work contexts:", ...rows].join("\n"),
       };
     }
     case "unknown":
       return {
         handled: true,
-        message: "Unknown command. Try /help.",
+        message: "unknown command. try /help",
       };
   }
+}
+
+function formatModelName(modelId: string): string {
+  const match = /^gpt-([0-9.]+)(?:-(.+))?$/iu.exec(modelId);
+  if (match !== null) {
+    const suffix = match[2]
+      ?.split("-")
+      .map((part) => part[0]!.toUpperCase() + part.slice(1))
+      .join(" ");
+    return `GPT-${match[1]}${suffix === undefined ? "" : ` ${suffix}`}`;
+  }
+  return modelId;
 }
 
 const explicitApprovalPattern = /^\/(approve|reject)\s+([a-f0-9-]{36})$/iu;
@@ -260,7 +236,7 @@ export class AuthorizedCommandHandler {
     const lower = normalized.toLowerCase();
     if (lower === "/cancel") {
       if (this.options.cancellation === undefined) {
-        return { handled: true, response: "Nothing is configured to cancel." };
+        return { handled: true, response: "nothing is configured to cancel" };
       }
       const canceled = await this.options.cancellation.cancel(
         actor.ownerId,
@@ -271,8 +247,8 @@ export class AuthorizedCommandHandler {
         handled: true,
         canceled,
         response: canceled
-          ? "Canceled the current task in this conversation."
-          : "There is no current task to cancel in this conversation.",
+          ? "canceled it"
+          : "nothing active to cancel",
       };
     }
 
@@ -288,7 +264,7 @@ export class AuthorizedCommandHandler {
     ) {
       return {
         handled: true,
-        response: "Only the active owner may approve or reject actions.",
+        response: "only the active owner may approve or reject actions",
       };
     }
     if (explicit?.[1] !== undefined && explicit[2] !== undefined) {
@@ -306,8 +282,8 @@ export class AuthorizedCommandHandler {
           handled: true,
           response:
             pending.length === 0
-              ? "There is no live approval request in this conversation."
-              : "More than one approval is pending. Reply with /approve <id> or /reject <id>.",
+              ? "no live approval request in this conversation"
+              : "more than one approval is pending. reply with /approve <id> or /reject <id>",
         };
       }
       return this.respond(
@@ -322,7 +298,7 @@ export class AuthorizedCommandHandler {
       return {
         handled: true,
         response:
-          "Unknown command. Use /approve <id>, /reject <id>, or /cancel.",
+          "unknown command. use /approve <id>, /reject <id>, or /cancel",
       };
     }
     return { handled: false };
@@ -345,9 +321,9 @@ export class AuthorizedCommandHandler {
       ...(changed ? { approvalChanged: status } : {}),
       response: changed
         ? status === "approved"
-          ? `Approved ${approvalId} for one exact execution.`
-          : `Rejected ${approvalId}. No action will run.`
-        : "That approval is unavailable, expired, already answered, or outside this conversation.",
+          ? `approved ${approvalId} for one exact execution`
+          : `rejected ${approvalId}. no action will run`
+        : "that approval is unavailable, expired, already answered, or outside this conversation",
     };
   }
 }

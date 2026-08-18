@@ -105,6 +105,25 @@ export const deployments = pgTable("deployments", {
   ...timestamps,
   status: deploymentStatus("status").default("active").notNull(),
   defaultModelProfile: varchar("default_model_profile", { length: 64 }).notNull(),
+  chatgptPlanType: varchar("chatgpt_plan_type", { length: 64 }),
+  preferredModelId: varchar("preferred_model_id", { length: 128 })
+    .default("gpt-5.6-luna")
+    .notNull(),
+  preferredReasoningEffort: varchar("preferred_reasoning_effort", {
+    length: 32,
+  })
+    .default("high")
+    .notNull(),
+  effectiveModelId: varchar("effective_model_id", { length: 128 }),
+  effectiveReasoningEffort: varchar("effective_reasoning_effort", {
+    length: 32,
+  }),
+  modelSelectionState: varchar("model_selection_state", { length: 32 })
+    .default("pending")
+    .notNull(),
+  modelCatalogRefreshedAt: timestamp("model_catalog_refreshed_at", {
+    withTimezone: true,
+  }),
   settingsJson: jsonb("settings_json").$type<Record<string, unknown>>().default({}).notNull(),
 });
 
@@ -263,6 +282,9 @@ export const chains = pgTable(
       { onDelete: "set null" },
     ),
     modelProfile: varchar("model_profile", { length: 64 }),
+    modelId: varchar("model_id", { length: 128 }),
+    reasoningEffort: varchar("reasoning_effort", { length: 32 }),
+    modelSelectionSource: varchar("model_selection_source", { length: 32 }),
     promptVersion: varchar("prompt_version", { length: 128 }),
     decisionJson: jsonb("decision_json").$type<Record<string, unknown>>(),
     terminalErrorCode: varchar("terminal_error_code", { length: 128 }),

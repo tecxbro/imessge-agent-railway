@@ -1,4 +1,8 @@
 import type { InteractionRuntime } from "../../agent/interaction-runtime.js";
+import {
+  asCodexModelProfile,
+  type ModelSelection,
+} from "../../agent/model-selection.js";
 import type { PromptSection } from "../../agent/prompt-builder.js";
 import {
   executionResultSchema,
@@ -7,7 +11,6 @@ import {
   type ExecutionResult,
   type InteractionDecision,
 } from "../../agent/schemas.js";
-import type { ModelProfileName, ModelProfiles } from "../../config/model-profiles.js";
 import type { PromptBundle } from "../../config/prompt-bundle.js";
 import { splitMessageBubbles } from "../../messaging/bubble-splitter.js";
 import { assertUserFacingMessageSafe } from "../../messaging/user-visible-policy.js";
@@ -75,7 +78,7 @@ export interface TurnSynthesisContext {
   conversationHistory: readonly string[];
   priorStatusMessage?: string;
   terminalResults: readonly unknown[];
-  selectedModelProfile: ModelProfileName;
+  modelSelection: ModelSelection;
   interactionWorkingDirectory: string;
   recoverySummary?: string;
 }
@@ -98,7 +101,6 @@ export interface TurnSynthesizeDependencies {
   repository: TurnSynthesisRepository;
   interaction: Pick<InteractionRuntime, "run">;
   publisher: Pick<QueuePublisher, "enqueueOutboundSend">;
-  modelProfiles: ModelProfiles;
   promptBundle: PromptBundle;
   encrypt(plaintext: string): Promise<string> | string;
   maximumBubbleCharacters?: number;
@@ -176,7 +178,7 @@ function withTruthfulPartialFailure(
   }
   return interactionDecisionSchema.parse({
     ...decision,
-    userMessage: `Some requested work couldn’t be completed. ${decision.userMessage}`,
+    userMessage: `part of that didn’t finish. ${decision.userMessage}`,
   });
 }
 
@@ -200,7 +202,7 @@ export function createTurnSynthesizeHandler(
     const run = await dependencies.interaction.run({
       ownerId: context.ownerId,
       spaceId: context.spaceId,
-      modelProfile: dependencies.modelProfiles[context.selectedModelProfile],
+      modelProfile: asCodexModelProfile(context.modelSelection),
       workingDirectory: context.interactionWorkingDirectory,
       sections: synthesisSections(
         context,
