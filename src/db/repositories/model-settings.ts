@@ -3,6 +3,19 @@ import { z } from "zod";
 
 import type { CodexModelOption } from "../../agent/codex-account-capabilities.js";
 import {
+  MODEL_CAPABILITY_SOURCE_KINDS,
+  normalizedModelCatalogSchema,
+} from "../../agent/model-capability-source.js";
+import {
+  MODEL_SETTINGS_ERROR_CODES,
+  type ModelSettingsErrorCode,
+} from "../../agent/model-settings-errors.js";
+import type {
+  ModelSettingsProbeState,
+  ModelSettingsReconciliationRecord,
+  PersistModelSettingsReconciliationInput,
+} from "../../agent/model-settings-service.js";
+import {
   modelSelectionSchema,
   modelSelectionStateSchema,
   modelSupportsSelection,
@@ -11,9 +24,20 @@ import {
   type ModelSelection,
 } from "../../agent/model-selection.js";
 import { deployments } from "../schema.js";
+import { modelSettingsReconciliation } from "../schema-fragments/model-settings-reconciliation.js";
 import type { Database, DatabaseTransaction } from "../client.js";
 
 const planTypeSchema = z.string().trim().min(1).max(64).nullable();
+const catalogHashSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+const sourceKindSchema = z.enum(MODEL_CAPABILITY_SOURCE_KINDS);
+const sourceStateSchema = z.enum(["available", "unavailable"]);
+const probeStateSchema = z.enum([
+  "not_probed",
+  "supported",
+  "unsupported",
+  "failed",
+]);
+const modelSettingsErrorCodeSchema = z.enum(MODEL_SETTINGS_ERROR_CODES);
 
 export class ModelPreferenceUnavailableError extends Error {
   public constructor() {
@@ -152,6 +176,141 @@ export class ModelSettingsRepository {
     return await this.read();
   }
 
+  public async readReconciliation(): Promise<
+    ModelSettingsReconciliationRecord | undefined
+  > {
+    const [row] = await this.database
+      .select()
+      .from(modelSettingsReconciliation)
+      .where(
+        eq(modelSettingsReconciliation.deploymentId, this.deploymentId),
+      )
+      .limit(1);
+    if (row === undefined) {
+      return undefined;
+    }
+    const effective = parseOptionalSelection(
+      row.effectiveModelId,
+      row.effectiveReasoningEffort,
+      "effective",
+    );
+    const probedSelection = parseOptionalSelection(
+      row.probedModelId,
+      row.probedReasoningEffort,
+      "probed",
+    );
+    const selectionState = modelSelectionStateSchema.parse(row.selectionState);
+    if (selectionState === "pending") {
+      throw new Error(
+        "Persisted model reconciliation cannot use the pending selection state.",
+      );
+    }
+    return {
+      sourceKind: sourceKindSchema.parse(row.sourceKind),
+      sourceState: sourceStateSchema.parse(row.sourceState),
+      planType: planTypeSchema.parse(row.planType),
+      catalog: normalizedModelCatalogSchema.parse(row.catalogJson),
+      catalogHash: catalogHashSchema.parse(row.catalogHash),
+      effective,
+      selectionState,
+      probeState: probeStateSchema.parse(row.probeState),
+      probedCatalogHash:
+        row.probedCatalogHash === null
+          ? null
+          : catalogHashSchema.parse(row.probedCatalogHash),
+      probedSelection,
+      sourceRefreshedAt: row.sourceRefreshedAt,
+      probedAt: row.probedAt,
+      lastErrorCode:
+        row.lastErrorCode === null
+          ? null
+          : modelSettingsErrorCodeSchema.parse(row.lastErrorCode),
+    };
+  }
+
+  public async persistReconciliation(
+    input: PersistModelSettingsReconciliationInput,
+  ): Promise<DeploymentModelSettings> {
+    const preferred = modelSelectionSchema.parse(input.preferred);
+    const reconciliation = parseReconciliation(input.reconciliation);
+    await this.database.transaction(async (transaction) => {
+      await this.lockedPreferred(transaction);
+      const updated = await transaction
+        .update(deployments)
+        .set({
+          ...(input.replacePreference
+            ? {
+                preferredModelId: preferred.modelId,
+                preferredReasoningEffort: preferred.reasoningEffort,
+              }
+            : {}),
+          chatgptPlanType: reconciliation.planType,
+          effectiveModelId: reconciliation.effective?.modelId ?? null,
+          effectiveReasoningEffort:
+            reconciliation.effective?.reasoningEffort ?? null,
+          modelSelectionState: reconciliation.selectionState,
+          modelCatalogRefreshedAt: reconciliation.sourceRefreshedAt,
+          updatedAt: new Date(),
+        })
+        .where(eq(deployments.id, this.deploymentId))
+        .returning({ id: deployments.id });
+      if (updated.length !== 1) {
+        throw new Error(
+          "The deployment model reconciliation could not be persisted. Initialize the deployment row and retry.",
+        );
+      }
+
+      const now = new Date();
+      await transaction
+        .insert(modelSettingsReconciliation)
+        .values({
+          deploymentId: this.deploymentId,
+          sourceKind: reconciliation.sourceKind,
+          sourceState: reconciliation.sourceState,
+          planType: reconciliation.planType,
+          catalogJson: reconciliation.catalog,
+          catalogHash: reconciliation.catalogHash,
+          effectiveModelId: reconciliation.effective?.modelId ?? null,
+          effectiveReasoningEffort:
+            reconciliation.effective?.reasoningEffort ?? null,
+          selectionState: reconciliation.selectionState,
+          probeState: reconciliation.probeState,
+          probedCatalogHash: reconciliation.probedCatalogHash,
+          probedModelId: reconciliation.probedSelection?.modelId ?? null,
+          probedReasoningEffort:
+            reconciliation.probedSelection?.reasoningEffort ?? null,
+          sourceRefreshedAt: reconciliation.sourceRefreshedAt,
+          probedAt: reconciliation.probedAt,
+          lastErrorCode: reconciliation.lastErrorCode,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: modelSettingsReconciliation.deploymentId,
+          set: {
+            sourceKind: reconciliation.sourceKind,
+            sourceState: reconciliation.sourceState,
+            planType: reconciliation.planType,
+            catalogJson: reconciliation.catalog,
+            catalogHash: reconciliation.catalogHash,
+            effectiveModelId: reconciliation.effective?.modelId ?? null,
+            effectiveReasoningEffort:
+              reconciliation.effective?.reasoningEffort ?? null,
+            selectionState: reconciliation.selectionState,
+            probeState: reconciliation.probeState,
+            probedCatalogHash: reconciliation.probedCatalogHash,
+            probedModelId: reconciliation.probedSelection?.modelId ?? null,
+            probedReasoningEffort:
+              reconciliation.probedSelection?.reasoningEffort ?? null,
+            sourceRefreshedAt: reconciliation.sourceRefreshedAt,
+            probedAt: reconciliation.probedAt,
+            lastErrorCode: reconciliation.lastErrorCode,
+            updatedAt: now,
+          },
+        });
+    });
+    return await this.read();
+  }
+
   async lockedPreferred(
     transaction: DatabaseTransaction,
   ): Promise<ModelSelection> {
@@ -173,4 +332,64 @@ export class ModelSettingsRepository {
     }
     return modelSelectionSchema.parse(row);
   }
+}
+
+function parseOptionalSelection(
+  modelId: string | null,
+  reasoningEffort: string | null,
+  label: string,
+): ModelSelection | null {
+  if (modelId === null && reasoningEffort === null) {
+    return null;
+  }
+  if (modelId === null || reasoningEffort === null) {
+    throw new Error(`The persisted ${label} model pair is incomplete.`);
+  }
+  return modelSelectionSchema.parse({ modelId, reasoningEffort });
+}
+
+function parseReconciliation(
+  input: ModelSettingsReconciliationRecord,
+): ModelSettingsReconciliationRecord {
+  const selectionState = modelSelectionStateSchema.parse(input.selectionState);
+  if (selectionState === "pending") {
+    throw new Error(
+      "A final model reconciliation cannot use the pending selection state.",
+    );
+  }
+  const probeState: ModelSettingsProbeState = probeStateSchema.parse(
+    input.probeState,
+  );
+  const lastErrorCode: ModelSettingsErrorCode | null =
+    input.lastErrorCode === null
+      ? null
+      : modelSettingsErrorCodeSchema.parse(input.lastErrorCode);
+  return {
+    sourceKind: sourceKindSchema.parse(input.sourceKind),
+    sourceState: sourceStateSchema.parse(input.sourceState),
+    planType: planTypeSchema.parse(input.planType),
+    catalog: normalizedModelCatalogSchema.parse(input.catalog),
+    catalogHash: catalogHashSchema.parse(input.catalogHash),
+    effective:
+      input.effective === null
+        ? null
+        : modelSelectionSchema.parse(input.effective),
+    selectionState,
+    probeState,
+    probedCatalogHash:
+      input.probedCatalogHash === null
+        ? null
+        : catalogHashSchema.parse(input.probedCatalogHash),
+    probedSelection:
+      input.probedSelection === null
+        ? null
+        : modelSelectionSchema.parse(input.probedSelection),
+    sourceRefreshedAt:
+      input.sourceRefreshedAt === null
+        ? null
+        : new Date(input.sourceRefreshedAt.getTime()),
+    probedAt:
+      input.probedAt === null ? null : new Date(input.probedAt.getTime()),
+    lastErrorCode,
+  };
 }

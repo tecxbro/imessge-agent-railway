@@ -99,15 +99,16 @@ describe("bounded execution runtime", () => {
     await mkdir(join(root, "workspace"));
     const runner = new CanceledRunner();
     const runtime = new ExecutionRuntime(
-      new ThreadStore(new TestThreadRepository(), runner),
+      new ThreadStore(new TestThreadRepository(), runner, () => runner),
     );
 
     const result = await runtime.run({
+      chainId: "00000000-0000-4000-8000-000000000010",
       ownerId: "00000000-0000-4000-8000-000000000001",
-      maximumPermissionProfile: "workspace-write",
+      authorizedPermissionProfiles: ["workspace-write"],
       task: task(),
       modelProfile,
-      workspaceRoot: root,
+      resolvedWorkspacePath: join(root, "workspace"),
       policySections: [
         {
           name: "Execution policy",
@@ -125,23 +126,23 @@ describe("bounded execution runtime", () => {
     expect(runner.calls).toBe(1);
   });
 
-  it("rejects a symlink workspace escape before invoking Codex", async () => {
+  it("rejects a permission outside the exact authorized set before invoking Codex", async () => {
     const root = await mkdtemp(join(tmpdir(), "execution-runtime-root-"));
-    const outside = await mkdtemp(join(tmpdir(), "execution-runtime-outside-"));
-    temporaryDirectories.push(root, outside);
-    await symlink(outside, join(root, "escaped"));
+    temporaryDirectories.push(root);
+    await mkdir(join(root, "workspace"));
     const runner = new CanceledRunner();
     const runtime = new ExecutionRuntime(
-      new ThreadStore(new TestThreadRepository(), runner),
+      new ThreadStore(new TestThreadRepository(), runner, () => runner),
     );
 
     await expect(
       runtime.run({
+        chainId: "00000000-0000-4000-8000-000000000010",
         ownerId: "00000000-0000-4000-8000-000000000001",
-        maximumPermissionProfile: "workspace-write",
-        task: task("escaped"),
+        authorizedPermissionProfiles: ["read"],
+        task: task(),
         modelProfile,
-        workspaceRoot: root,
+        resolvedWorkspacePath: join(root, "workspace"),
         policySections: [
           {
             name: "Execution policy",
@@ -150,7 +151,7 @@ describe("bounded execution runtime", () => {
           },
         ],
       }),
-    ).rejects.toThrow(/outside AGENT_WORKSPACE_ROOT/);
+    ).rejects.toThrow(/not in the code-authorized set/);
     expect(runner.calls).toBe(0);
   });
 
@@ -164,16 +165,21 @@ describe("bounded execution runtime", () => {
     await writeFile(outsideFile, "private", "utf8");
     await symlink(outsideFile, join(workspace, "escaped-artifact.md"));
     const runtime = new ExecutionRuntime(
-      new ThreadStore(new TestThreadRepository(), new ArtifactRunner()),
+      new ThreadStore(
+        new TestThreadRepository(),
+        new ArtifactRunner(),
+        () => new ArtifactRunner(),
+      ),
     );
 
     await expect(
       runtime.run({
+        chainId: "00000000-0000-4000-8000-000000000010",
         ownerId: "00000000-0000-4000-8000-000000000001",
-        maximumPermissionProfile: "workspace-write",
+        authorizedPermissionProfiles: ["workspace-write"],
         task: task(),
         modelProfile,
-        workspaceRoot: root,
+        resolvedWorkspacePath: workspace,
         policySections: [
           {
             name: "Execution policy",

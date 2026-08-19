@@ -13,7 +13,6 @@ import {
   ownerContainerTag,
 } from "./supermemory-client.js";
 import {
-  failReceiptSafely,
   MemoryReceiptError,
   type MemoryReceiptStore,
 } from "./receipts.js";
@@ -45,12 +44,31 @@ export interface CurationContext {
   turnSucceeded: boolean;
 }
 
-export interface CurationResultItem {
-  contentHash: string;
-  status: "written" | "updated" | "deduplicated" | "filtered";
-  filterReason?: CurationFilterReason;
-  externalMemoryId?: string;
-}
+export type CurationResultItem =
+  | {
+      contentHash: string;
+      status: "written" | "updated" | "deduplicated";
+      externalMemoryId?: string;
+      filterReason?: never;
+      failureCode?: never;
+      retryable?: never;
+    }
+  | {
+      contentHash: string;
+      status: "filtered";
+      filterReason: CurationFilterReason;
+      externalMemoryId?: never;
+      failureCode?: never;
+      retryable?: never;
+    }
+  | {
+      contentHash: string;
+      status: "failed";
+      failureCode: string;
+      retryable: boolean;
+      externalMemoryId?: never;
+      filterReason?: never;
+    };
 
 export class MemoryProjectionError extends Error {
   readonly code: string;
@@ -147,6 +165,43 @@ function safeFailureCode(error: unknown): string {
   return "MEMORY_PROJECTION_FAILED";
 }
 
+function isRetryableFailure(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "retryable" in error &&
+    error.retryable === true
+  );
+}
+
+async function failedResult(input: {
+  receipts: MemoryReceiptStore;
+  pendingReceiptId?: string;
+  contentHash: string;
+  error: unknown;
+}): Promise<CurationResultItem> {
+  let error = input.error;
+  if (input.pendingReceiptId !== undefined) {
+    try {
+      await input.receipts.markFailed(
+        input.pendingReceiptId,
+        safeFailureCode(error),
+      );
+    } catch (receiptError) {
+      error = new MemoryReceiptError(
+        "The memory operation failed and its redacted failure receipt could not be stored; repair PostgreSQL before retrying.",
+        { cause: new AggregateError([error, receiptError]) },
+      );
+    }
+  }
+  return {
+    contentHash: input.contentHash,
+    status: "failed",
+    failureCode: safeFailureCode(error),
+    retryable: isRetryableFailure(error),
+  };
+}
+
 async function findProviderDuplicate(
   provider: SupermemoryPort,
   containerTag: string,
@@ -189,39 +244,53 @@ export async function curateMemories(input: {
     }
     localHashes.add(contentHash);
 
-    const succeeded = await input.receipts.findSucceededByContentHash(
-      context.ownerId,
-      contentHash,
-    );
-    if (succeeded?.externalMemoryId !== undefined) {
-      results.push({
-        contentHash,
-        status: "deduplicated",
-        externalMemoryId: succeeded.externalMemoryId,
-      });
-      continue;
-    }
-
-    const providerDuplicate = await findProviderDuplicate(
-      input.provider,
-      containerTag,
-      candidate,
-      contentHash,
-      input.signal,
-    );
-    const operation = candidate.replacesMemoryId === null ? "add" : "update";
-    const pending = await input.receipts.createPending({
-      ownerId: context.ownerId,
-      spaceId: context.spaceId,
-      chainId: context.chainId,
-      operation,
-      contentHash,
-      safeSummary: `${candidate.kind}:${candidate.scope}`,
-    });
-
+    let pendingReceiptId: string | undefined;
     try {
+      const succeeded = await input.receipts.findSucceededByContentHash(
+        context.ownerId,
+        contentHash,
+      );
+      if (succeeded?.externalMemoryId !== undefined) {
+        results.push({
+          contentHash,
+          status: "deduplicated",
+          externalMemoryId: succeeded.externalMemoryId,
+        });
+        continue;
+      }
+
+      const providerDuplicate = await findProviderDuplicate(
+        input.provider,
+        containerTag,
+        candidate,
+        contentHash,
+        input.signal,
+      );
+      const operation = candidate.replacesMemoryId === null ? "add" : "update";
+      const pending = await input.receipts.createPending({
+        ownerId: context.ownerId,
+        spaceId: context.spaceId,
+        chainId: context.chainId,
+        operation,
+        contentHash,
+        safeSummary: `${candidate.kind}:${candidate.scope}`,
+      });
+      pendingReceiptId = pending.id;
+      if (
+        pending.status === "succeeded" &&
+        pending.externalMemoryId !== undefined
+      ) {
+        results.push({
+          contentHash,
+          status: "deduplicated",
+          externalMemoryId: pending.externalMemoryId,
+        });
+        continue;
+      }
+
       let externalMemoryId = providerDuplicate;
-      let resultStatus: CurationResultItem["status"] = "deduplicated";
+      let resultStatus: "written" | "updated" | "deduplicated" =
+        "deduplicated";
       if (externalMemoryId === undefined && candidate.replacesMemoryId !== null) {
         const updated = await input.provider.updateMemory({
           containerTag,
@@ -256,18 +325,20 @@ export async function curateMemories(input: {
         resultStatus = "written";
       }
 
-      await input.receipts.markSucceeded(pending.id, externalMemoryId);
+      await input.receipts.markSucceeded(pendingReceiptId, externalMemoryId);
       results.push({
         contentHash,
         status: resultStatus,
         externalMemoryId,
       });
     } catch (error) {
-      await failReceiptSafely(
-        input.receipts,
-        pending.id,
-        safeFailureCode(error),
-        error,
+      results.push(
+        await failedResult({
+          receipts: input.receipts,
+          ...(pendingReceiptId === undefined ? {} : { pendingReceiptId }),
+          contentHash,
+          error,
+        }),
       );
     }
   }

@@ -74,6 +74,24 @@ describeDatabase("pg-boss durable queue", () => {
     );
   });
 
+  it("stores a zero-debounce flush without a future start time", async () => {
+    const immediateSpaceId = "20000000-0000-4000-8000-000000000004";
+    const publisher = new PgBossPublisher(queue.boss);
+
+    await publisher.scheduleInboundFlush({ spaceId: immediateSpaceId }, 0);
+
+    const jobs = await queue.boss.findJobs(QUEUE_NAMES.inboundFlush, {
+      queued: true,
+    });
+    const job = jobs.find(
+      (candidate) =>
+        (candidate.data as { spaceId?: string }).spaceId === immediateSpaceId,
+    );
+
+    expect(job).toBeDefined();
+    expect(job!.startAfter.getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
   it("creates one synthesis job per chain", async () => {
     const publisher = new PgBossPublisher(queue.boss);
     const payload = {

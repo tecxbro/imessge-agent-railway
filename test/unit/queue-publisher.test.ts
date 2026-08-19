@@ -31,6 +31,33 @@ describe("pg-boss publisher", () => {
     expect(JSON.stringify(upsert.mock.calls)).not.toContain("text");
   });
 
+  it("makes a zero-debounce inbound flush immediately eligible", async () => {
+    const now = new Date("2026-08-14T00:00:00Z");
+    const upsert = vi.fn().mockResolvedValue({
+      jobs: ["job-id"],
+      updated: 0,
+      inserted: 1,
+    });
+
+    const publisher = new PgBossPublisher(
+      { send: vi.fn(), upsert },
+      () => now,
+    );
+
+    await publisher.scheduleInboundFlush({ spaceId }, 0);
+
+    expect(upsert).toHaveBeenCalledWith(
+      QUEUE_NAMES.inboundFlush,
+      { spaceId },
+      expect.objectContaining({
+        singletonKey: `space:${spaceId}`,
+        startAfter: now,
+        retryLimit: 5,
+        retryBackoff: true,
+      }),
+    );
+  });
+
   it("uses task, chain, and batch singleton keys for orchestration", async () => {
     const send = vi.fn().mockResolvedValue("job-id");
     const publisher = new PgBossPublisher({ send, upsert: vi.fn() });

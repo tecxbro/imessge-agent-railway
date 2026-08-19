@@ -12,6 +12,7 @@ import {
 import type { ThreadStore } from "./thread-store.js";
 
 export interface InteractionRuntimeRequest {
+  chainId: string;
   ownerId: string;
   spaceId: string;
   modelProfile: ModelProfile;
@@ -42,6 +43,7 @@ export class InteractionRuntime {
       sections: request.sections,
     });
     const turn = await this.threads.run({
+      authorizationChainId: request.chainId,
       scope: {
         kind: "interaction",
         ownerId: request.ownerId,

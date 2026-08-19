@@ -14,6 +14,7 @@ import {
   type TurnPlanRepository,
 } from "../../src/queue/handlers/turn-plan.js";
 import type { QueuePublisher } from "../../src/queue/publisher.js";
+import { CodexStartDeniedError } from "../../src/security/queued-authorization.js";
 
 const chainId = "00000000-0000-4000-8000-000000000001";
 const payload = {
@@ -245,5 +246,38 @@ describe("Step 5 turn-plan handler", () => {
     expect(fake.interaction.run).not.toHaveBeenCalled();
     expect(fake.repository.commitFinal).toHaveBeenCalledTimes(1);
     expect(fake.publisher.enqueueOutboundSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("terminalizes a load-time queued authorization denial", async () => {
+    const decision: InteractionDecision = {
+      mode: "silent",
+      userMessage: null,
+      statusMessage: null,
+      tasks: [],
+      waitForTasks: false,
+      memoryCandidates: [],
+    };
+    const fake = fakes(planContext("hello"), decision);
+    const denyChainCodexStart = vi.fn(async () => true);
+    fake.repository.loadPlanContext = vi.fn(async () => {
+      throw new CodexStartDeniedError("CODEX_START_AUTHORIZATION_INVALID");
+    });
+    fake.repository.denyChainCodexStart = denyChainCodexStart;
+    const handler = createTurnPlanHandler({
+      ...fake,
+      commandHandlers: commandHandlers(),
+      promptBundle: await loadPromptBundle(),
+      encrypt: (plaintext) => plaintext,
+    });
+
+    await handler(payload);
+
+    expect(fake.interaction.run).not.toHaveBeenCalled();
+    expect(denyChainCodexStart).toHaveBeenCalledWith({
+      chainId,
+      expectedChainVersion: 3,
+      expectedState: "queued",
+      errorCode: "CODEX_START_AUTHORIZATION_INVALID",
+    });
   });
 });

@@ -30,11 +30,12 @@ Imported values are one-time inputs: successful import persists the encrypted id
 
 Keep `PAIRING_MODE=off` unless pairing has been explicitly reviewed for the deployment. `GROUP_MODE=disabled` rejects group use; `owner_mentions_only` requires the owner/group policy enforced by the application.
 
-## Public dashboard
+## Dashboard onboarding
 
 The dashboard has no password environment variable, login route, session cookie, or CSRF credential. Fresh Railway deployments configure the owner through the dashboard rather than a service variable. The former dashboard credential variables are unsupported and startup rejects them if they are still present, including when set to an empty string. Existing services must delete those two legacy variables from Railway before deploying this version; see [Troubleshooting](./TROUBLESHOOTING.md).
 
-The dashboard is public. Read-only setup status and detailed readiness are available to any visitor, and a visitor who opens the page can submit owner, Photon, and ChatGPT setup changes. Mutations require a matching `Origin` and reject cross-site fetch metadata, which reduces drive-by cross-site requests but is not user authentication.
+Owner, Photon, and ChatGPT setup are managed from the dashboard. Mutations
+require a matching `Origin` and reject cross-site fetch metadata.
 
 ## Codex authentication
 
@@ -94,12 +95,14 @@ only after the exact pair passes the bounded Codex capability probe.
 
 | Variable | Required | Default | Allowed range | Restart required |
 |---|---:|---:|---:|---:|
-| `INBOUND_DEBOUNCE_MS` | No | `4000` | 3000–5000 | Yes |
+| `INBOUND_DEBOUNCE_MS` | No | `0` | 0–5000 | Yes |
 | `MAX_EXECUTION_CONCURRENCY` | No | `3` | 1–20 | Yes |
 | `MAX_OWNER_EXECUTION_CONCURRENCY` | No | `2` | 1–20 and no greater than global | Yes |
 | `MESSAGE_RATE_LIMIT_PER_MINUTE` | No | `60` | 1–10000 | Yes |
 | `TASK_RATE_LIMIT_PER_HOUR` | No | `120` | 1–10000 | Yes |
 | `MAX_TASK_RUNTIME_MS` | No | `900000` | 1000–3600000 | Yes |
+
+`0` starts processing immediately and is the production default. A non-zero value batches messages sent within the configured window but adds the same amount of guaranteed latency before processing begins.
 
 These bounds protect provider load and child-process capacity. Increasing them changes resource and abuse risk; validate queue recovery, cancellation, and Railway service capacity before deployment.
 

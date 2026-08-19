@@ -13,6 +13,8 @@ import {
 } from "drizzle-orm";
 
 import type { Database, DatabaseTransaction } from "../client.js";
+import type { QueuedAuthorizationReference } from "../../security/queued-authorization.js";
+import type { ChainAuthorizationRepository } from "./chain-authorization.js";
 import {
   carriedMessages,
   approvals,
@@ -21,6 +23,7 @@ import {
   deployments,
   messages,
   outboundBatches,
+  channelIdentities,
   spaces,
 } from "../schema.js";
 import {
@@ -55,7 +58,13 @@ export interface QueuedChain {
 }
 
 export class ChainRepository {
-  public constructor(private readonly database: Database) {}
+  public constructor(
+    private readonly database: Database,
+    private readonly authorizationReferences?: Pick<
+      ChainAuthorizationRepository,
+      "captureInTransaction"
+    >,
+  ) {}
 
   public async flushInboundMessages(
     spaceId: string,
@@ -67,7 +76,11 @@ export class ChainRepository {
       );
 
       const undrained = await transaction
-        .select({ id: messages.id, receivedAt: messages.receivedAt })
+        .select({
+          id: messages.id,
+          receivedAt: messages.receivedAt,
+          senderIdentityId: messages.senderIdentityId,
+        })
         .from(messages)
         .where(
           and(
@@ -101,8 +114,11 @@ export class ChainRepository {
         .select({
           id: carriedMessages.id,
           messageId: carriedMessages.sourceMessageId,
+          senderIdentityId: messages.senderIdentityId,
+          receivedAt: messages.receivedAt,
         })
         .from(carriedMessages)
+        .innerJoin(messages, eq(messages.id, carriedMessages.sourceMessageId))
         .where(
           and(
             eq(carriedMessages.spaceId, spaceId),
@@ -177,6 +193,77 @@ export class ChainRepository {
           .update(carriedMessages)
           .set({ consumedByChainId: chainId, updatedAt: startedAt })
           .where(inArray(carriedMessages.id, carriedIds));
+      }
+
+      if (this.authorizationReferences !== undefined) {
+        const capturedIdentities = [
+          ...pendingCarry.map((row) => ({
+            identityId: row.senderIdentityId,
+            receivedAt: row.receivedAt,
+            direct: false,
+          })),
+          ...undrained.map((row) => ({
+            identityId: row.senderIdentityId,
+            receivedAt: row.receivedAt,
+            direct: true,
+          })),
+        ].sort((left, right) =>
+          (left.receivedAt?.getTime() ?? 0) -
+            (right.receivedAt?.getTime() ?? 0),
+        );
+        if (capturedIdentities.some((row) => row.identityId === null)) {
+          throw new Error(
+            "Chain authorization capture requires every message to have a persisted sender identity.",
+          );
+        }
+        const orderedIdentities = capturedIdentities.map((row) => ({
+          ...row,
+          identityId: row.identityId!,
+        }));
+        const principal =
+          [...orderedIdentities].reverse().find((row) => row.direct) ??
+          orderedIdentities.at(-1);
+        if (principal === undefined) {
+          throw new Error(
+            "Chain authorization capture requires at least one persisted sender identity.",
+          );
+        }
+        const [scope] = await transaction
+          .select({
+            deploymentId: spaces.deploymentId,
+            ownerId: channelIdentities.ownerId,
+          })
+          .from(spaces)
+          .innerJoin(
+            channelIdentities,
+            eq(channelIdentities.id, principal.identityId),
+          )
+          .where(eq(spaces.id, spaceId))
+          .limit(1);
+        if (scope === undefined) {
+          throw new Error(
+            "Chain authorization capture could not resolve the principal owner and deployment.",
+          );
+        }
+        const contributors = [
+          ...new Set(
+            orderedIdentities
+              .map((row) => row.identityId)
+              .filter((identityId) => identityId !== principal.identityId),
+          ),
+        ];
+        const reference: QueuedAuthorizationReference = {
+          deploymentId: scope.deploymentId,
+          ownerId: scope.ownerId,
+          chainId,
+          principalIdentityId: principal.identityId,
+          contributorIdentityIds: contributors,
+        };
+        await this.authorizationReferences.captureInTransaction(
+          transaction,
+          reference,
+          startedAt,
+        );
       }
 
       return {

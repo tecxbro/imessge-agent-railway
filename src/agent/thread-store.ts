@@ -39,6 +39,7 @@ export interface CodexThreadRepository {
 export interface RunStoredThreadRequest<Output>
   extends Omit<CodexRunRequest<Output>, "threadId"> {
   scope: CodexThreadScope;
+  authorizationChainId?: string;
   recoverySummary?: string;
 }
 
@@ -106,6 +107,9 @@ export class ThreadStore {
   public constructor(
     private readonly repository: CodexThreadRepository,
     private readonly client: StructuredCodexRunner,
+    private readonly authorizedRunner?: (
+      chainId: string,
+    ) => StructuredCodexRunner,
   ) {}
 
   public async run<Output>(
@@ -116,6 +120,15 @@ export class ThreadStore {
     const key = codexThreadScopeKey(request.scope);
     return await this.withScopeLock(key, async () => {
       const stored = await this.repository.get(key);
+      const client =
+        request.authorizationChainId === undefined
+          ? this.client
+          : this.authorizedRunner?.(request.authorizationChainId);
+      if (client === undefined) {
+        throw new Error(
+          "Queued Codex work requires a code-owned authorization runner.",
+        );
+      }
       const resumableThreadId =
         stored?.state === "active" ? stored.threadId : undefined;
       const baseRequest = this.clientRequest(request);
@@ -123,7 +136,7 @@ export class ThreadStore {
       let recovered = false;
       let result: CodexRunResult<Output>;
       try {
-        result = await this.client.runStructured({
+        result = await client.runStructured({
           ...baseRequest,
           ...(resumableThreadId === undefined
             ? {}
@@ -139,7 +152,7 @@ export class ThreadStore {
           stored.recoverySummary,
           request.prompt,
         ).content;
-        result = await this.client.runStructured({
+        result = await client.runStructured({
           ...baseRequest,
           prompt,
         });

@@ -96,69 +96,43 @@
 
 **Why:** the product needs different runtime, memory, permissions, models, and messaging rules, and should not present copied text as original work.
 
-## ADR-013 — No public admin UI in v1
-
-**Status:** Superseded by ADR-018. The project now accepts a public setup dashboard as a temporary product tradeoff.
-
-**Decision:** HTTP exposes health/readiness only; operator actions happen through private shell/CLI and iMessage commands.
-
-**Why:** an admin UI would add another auth surface unrelated to the primary product.
-
 ## ADR-014 — No attachment/voice support in v1
 
 **Decision:** text DMs first, with safe existing-group support.
 
 **Why:** transport, identity, recovery, Codex, and memory correctness are the release blockers. Rich media is a bounded follow-up once text is reliable.
 
-## ADR-015 — Authenticate the single-operator setup dashboard on the server
+## ADR-016 — Store the single owner identity through dashboard onboarding
 
-**Status:** Superseded by ADR-018.
+**Decision:** new Railway deployments never ask for the owner phone as a service variable. The dashboard accepts one E.164 personal phone through a same-origin-protected route. PostgreSQL `channel_identities` is the authorization authority: the phone is encrypted, fingerprinted per deployment, and returned only as a mask. Replacing it activates the new identity and revokes prior owner-phone identities transactionally. Photon resolves this database owner once per setup attempt; its separately assigned line remains the destination shown at completion. ADR-018 keeps the phone in dashboard onboarding instead of fresh-deployment environment configuration.
 
-**Decision:** protect dashboard state and Photon/ChatGPT setup behind a server-side operator session. Successful credential authentication creates an opaque session and session-bound CSRF token. Sessions expire after eight hours, the server stores at most eight, logout/revocation is idempotent, and a service restart invalidates them. ADR-017 replaces the original generated-credential selection while preserving this session boundary.
-
-State-changing setup requests require the live session, `X-CSRF-Token`, same-origin `Origin`, and non-cross-site fetch metadata. The browser cookie is `HttpOnly`, `SameSite=Strict`, `Path=/`, `Secure` in production, and has no `Domain`. Public `/healthz` remains liveness; public `/readyz` is aggregate only. Unauthenticated dashboard responses contain no provider status, device/verification codes, assigned number, owner information, readiness detail, or provider errors.
-
-**Why:** provider enrollment discloses sensitive, actionable state and starts external setup work. A public custom header and possession of dashboard JavaScript cannot authenticate an operator. A small restart-invalidated in-memory session store fits the existing single-instance deployment and leaves a reusable boundary for later owner-phone endpoints.
-
-**Constraint:** ADR-016 applies this boundary to dashboard-managed owner setup. ADR-017 changes password selection and verification without weakening session or CSRF behavior.
-
-**Rejected:** public setup/status endpoints, `x-agent-setup: dashboard`, the agent password in a cookie or rendered page, browser storage or URL authentication, callback-shaped provider flows, and durable/multi-tenant sessions in this single-owner release.
-
-## ADR-016 — Store the single owner identity through authenticated onboarding
-
-**Decision:** new Railway deployments do not require the owner phone as a service variable. The dashboard accepts one E.164 personal phone through a same-origin-protected route. PostgreSQL `channel_identities` is the authorization authority: the phone is encrypted, fingerprinted per deployment, and returned publicly only as a mask. Replacing it activates the new identity and revokes prior owner-phone identities transactionally. Photon resolves this database owner once per setup attempt; its separately assigned line remains the destination shown at completion. ADR-018 makes the dashboard public without moving the phone back into fresh-deployment environment configuration.
-
-Existing deployments first prefer an active database owner, then import `OWNER_PHONE_NUMBER` or one unambiguous E.164 `AGENT_OWNER_HANDLES` value. Stored Photon metadata is never imported as authorization. Ambiguous handles require explicit dashboard recovery, and old environment values remain until an operator removes them after verification.
+Existing deployments first prefer an active database owner, then import `OWNER_PHONE_NUMBER`, the former long owner alias, or one unambiguous E.164 `AGENT_OWNER_HANDLES` value. Stored Photon metadata is never imported as authorization. Ambiguous handles require explicit dashboard recovery, and old environment values remain until an operator removes them after verification.
 
 **Why:** sender authorization must survive restart without making provider credentials or a deployment form the authority. Separating the personal owner phone from the assigned agent line also makes the onboarding contract accurate.
 
-**Rejected:** a public owner route, query/header/cookie/path phone inputs, plaintext/settings/provider authorization, silently selecting one legacy handle, overwriting an active database identity from the environment, or starting Spectrum before owner setup.
+**Rejected:** query/header/cookie/path phone inputs, plaintext/settings/provider authorization, silently selecting one legacy handle, overwriting an active database identity from the environment, or starting Spectrum before owner setup.
 
-## ADR-017 — Collect a deployer-chosen agent password before the public service exists
+## ADR-018 — Keep onboarding values out of the deployment environment
 
-**Status:** Superseded by ADR-018.
+**Decision:** fresh Railway services configure no owner or dashboard credential environment value.
+Startup rejects the obsolete `AGENT_PASSWORD` and `DASHBOARD_SETUP_SECRET`
+keys so they cannot silently become active again. The owner phone remains
+dashboard-managed and persisted through `channel_identities`. Setup mutations require a matching `Origin` and reject
+cross-site fetch metadata.
 
-**Decision:** new deployments use a user-chosen `AGENT_PASSWORD` collected privately during initial deployment configuration. The public application never permits an unverified first visitor to claim administrator ownership or create a replacement password. The service verifies login attempts with asynchronous scrypt, a fresh random 16-byte process salt, and constant-time verifier comparison while preserving ADR-015 sessions, throttling, cookies, CSRF, and same-origin controls.
+**Why:** this keeps Railway deployment free of manually supplied onboarding
+values while preserving PostgreSQL as the owner-authorization authority and
+the dashboard as the owner, Photon, and ChatGPT setup flow.
 
-**Why:** the deployed URL is public as soon as the service starts. A first-visitor creation flow cannot establish that the browser belongs to the deployer, while the platform's private variable workflow can bind password choice to deployment configuration without adding a post-deploy configuration step.
-
-**Rejected:** browser-first administrator claiming, generating and displaying a credential on the public page, reusing the application encryption key, composition rules beyond the 15–128 character length boundary, and exposing provider enrollment data before password authentication.
-
-## ADR-018 — Temporarily restore a public setup dashboard with no dashboard credential environment
-
-**Decision:** remove the dashboard password, login/session routes, cookie and CSRF credential, and both former dashboard credential environment inputs. Fresh Railway deployments require no dashboard credential or owner-phone service variable. Startup rejects either obsolete dashboard credential key so it cannot silently become active again. The owner phone remains dashboard-managed and persisted through `channel_identities`.
-
-Dashboard pages, setup status, active device-flow values, assigned number, masked owner status, bounded provider error codes, and detailed readiness are public. Setup mutations require a matching `Origin` and reject cross-site fetch metadata, but those checks are not authentication. A visitor who deliberately opens the public dashboard can change setup.
-
-**Why:** the user explicitly chose the former public-dashboard product behavior as the smaller temporary implementation and rejected any dashboard password stored in the service environment. There is no deployer-bound identity handoff available inside this application, so this decision documents the exposure instead of presenting first-visitor or same-origin behavior as secure authentication.
-
-**Rejected for this release:** keeping either dashboard credential environment value, moving the owner phone back into fresh deployment variables, a first-visitor password claim, or claiming that Origin/fetch metadata identifies the operator.
+**Rejected for this release:** adding dashboard credential values to the
+deployment environment, moving the owner phone back into Railway service variables, or
+using stored provider metadata as sender authorization.
 
 ## ADR-019 — Default dashboard phone entry to the United States
 
 **Decision:** keep the owner identity canonical as strict E.164, but make the dashboard input boundary U.S.-first. The default form adds the `+1` country code to a valid U.S. national number. A link-style **Not in the U.S.?** disclosure exposes a native country selector; selected-country national input and complete international input are accepted only when they identify a valid number for that country. The server performs normalization and country validation before the existing identity controller persists or provisions the owner.
 
-The public owner route accepts exact `{ countryCode, phoneNumber }` dashboard JSON and retains the former exact `{ phoneNumber }` E.164 shape for compatibility. Existing environment migration inputs remain strict E.164. No browser locale, IP geolocation, database migration, readiness change, or deployment prompt is introduced.
+The owner setup route accepts exact `{ countryCode, phoneNumber }` dashboard JSON and retains the former exact `{ phoneNumber }` E.164 shape for compatibility. Existing environment migration inputs remain strict E.164. No browser locale, IP geolocation, database migration, readiness change, or deployment prompt is introduced.
 
 **Why:** the product assumes most deployers are in the United States, so requiring them to understand or type `+1` adds avoidable onboarding friction. Keeping validation server-side preserves the authorization, masking, replacement, and Photon contracts while still giving international owners an explicit path.
 

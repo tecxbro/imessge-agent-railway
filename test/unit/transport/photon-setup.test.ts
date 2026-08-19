@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  PhotonInstallationHttpProvider,
   PhotonSetupService,
   type PhotonSetupCredentials,
 } from "../../../src/transport/photon-setup.js";
@@ -128,5 +129,81 @@ describe("Photon dashboard owner resolution", () => {
       String(input).endsWith("/projects/project-1/users/"),
     );
     expect(userRequests).toHaveLength(1);
+  });
+});
+
+describe("durable Photon HTTP provider", () => {
+  it("creates by stable installation id without selecting a project by name", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ data: { id: "project-created" } }),
+    );
+    const provider = new PhotonInstallationHttpProvider(fetchImplementation);
+
+    await expect(
+      provider.createProject({
+        installationId: "00000000-0000-4000-8000-000000000010",
+        operationId: "00000000-0000-4000-8000-000000000011",
+        managementToken: "management-token",
+        projectName:
+          "iMessage Codex Agent - 00000000-0000-4000-8000-000000000010",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ photonProjectId: "project-created" });
+
+    expect(fetchImplementation).toHaveBeenCalledOnce();
+    const [input, init] = fetchImplementation.mock.calls[0]!;
+    expect(String(input)).toBe("https://app.photon.codes/api/projects");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("idempotency-key")).toBe(
+      "00000000-0000-4000-8000-000000000010",
+    );
+  });
+
+  it("uses distinct stable idempotency keys for initial issuance and explicit repair", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ projectSecret: "spectrum-secret" }),
+    );
+    const provider = new PhotonInstallationHttpProvider(fetchImplementation);
+    const signal = new AbortController().signal;
+
+    await provider.provisionInitialProjectSecret({
+      installationId: "00000000-0000-4000-8000-000000000020",
+      operationId: "00000000-0000-4000-8000-000000000021",
+      managementToken: "management-token",
+      photonProjectId: "project-1",
+      signal,
+    });
+    await provider.rotateProjectSecret({
+      operationId: "00000000-0000-4000-8000-000000000022",
+      managementToken: "management-token",
+      photonProjectId: "project-1",
+      signal,
+    });
+
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+    expect(
+      fetchImplementation.mock.calls.map(([, init]) =>
+        new Headers(init?.headers).get("idempotency-key"),
+      ),
+    ).toEqual([
+      "00000000-0000-4000-8000-000000000020",
+      "00000000-0000-4000-8000-000000000022",
+    ]);
+  });
+
+  it("rejects a token when the session JSON lacks a validated user", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) =>
+      String(input).endsWith("/api/auth/get-session")
+        ? jsonResponse({})
+        : jsonResponse([]),
+    );
+    const provider = new PhotonInstallationHttpProvider(fetchImplementation);
+
+    await expect(
+      provider.validateManagementToken({
+        managementToken: "management-token",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toBe(false);
   });
 });

@@ -191,7 +191,7 @@ Codex `model/list` catalog. There are no model environment variables.
 ### Behavior and limits
 
 ```dotenv
-INBOUND_DEBOUNCE_MS=4000
+INBOUND_DEBOUNCE_MS=0
 MAX_EXECUTION_CONCURRENCY=3
 MAX_TASK_RUNTIME_MS=900000
 RAW_MESSAGE_RETENTION_DAYS=30

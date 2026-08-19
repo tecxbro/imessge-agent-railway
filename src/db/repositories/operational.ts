@@ -1,6 +1,6 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
-import { and, asc, eq, isNull, ne } from "drizzle-orm";
+import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
 
 import type { AuthorizedSenderContext } from "../../security/authorize-sender.js";
 import { fingerprintSenderHandle } from "../../security/authorize-sender.js";
@@ -14,6 +14,10 @@ import {
   spaceMembers,
   spaces,
 } from "../schema.js";
+import {
+  ownerBindingRevisions,
+  photonInstallations,
+} from "../schema-fragments/photon-installations.js";
 
 export interface OperationalRepositoryOptions {
   deploymentId: string;
@@ -76,6 +80,10 @@ export class OperationalRepository {
             updatedAt: new Date(),
           },
         });
+      await transaction
+        .insert(ownerBindingRevisions)
+        .values({ deploymentId: this.options.deploymentId, ownerRevision: 0 })
+        .onConflictDoNothing();
       const [existingOwner] = await transaction
         .select({ id: owners.id })
         .from(owners)
@@ -103,6 +111,20 @@ export class OperationalRepository {
     }
     await this.database.transaction(async (transaction) => {
       const now = new Date();
+      await transaction.execute(
+        sql`select deployment_id from ${ownerBindingRevisions} where ${ownerBindingRevisions.deploymentId} = ${this.options.deploymentId} for update`,
+      );
+      const [revision] = await transaction
+        .select({ ownerRevision: ownerBindingRevisions.ownerRevision })
+        .from(ownerBindingRevisions)
+        .where(eq(ownerBindingRevisions.deploymentId, this.options.deploymentId))
+        .limit(1);
+      if (revision === undefined) {
+        throw new Error(
+          "Owner binding revision is missing; initialize the deployment before changing its owner.",
+        );
+      }
+      const nextOwnerRevision = revision.ownerRevision + 1;
       const [owner] = await transaction
         .select({ id: owners.id })
         .from(owners)
@@ -163,6 +185,27 @@ export class OperationalRepository {
             ne(channelIdentities.handleFingerprint, fingerprint),
           ),
         );
+
+      await transaction
+        .update(ownerBindingRevisions)
+        .set({ ownerRevision: nextOwnerRevision, updatedAt: now })
+        .where(
+          and(
+            eq(ownerBindingRevisions.deploymentId, this.options.deploymentId),
+            eq(ownerBindingRevisions.ownerRevision, revision.ownerRevision),
+          ),
+        );
+      await transaction
+        .update(photonInstallations)
+        .set({
+          ownerRevision: nextOwnerRevision,
+          operationId: randomUUID(),
+          state: sql`case when ${photonInstallations.photonProjectId} is not null and ${photonInstallations.spectrumSecretCiphertext} is not null then 'needs_owner_rebind'::photon_installation_state else ${photonInstallations.state} end`,
+          safeFailureCode: null,
+          journalVersion: sql`${photonInstallations.journalVersion} + 1`,
+          updatedAt: now,
+        })
+        .where(eq(photonInstallations.deploymentId, this.options.deploymentId));
     });
   }
 

@@ -12,6 +12,7 @@ import type { OutboundTransport } from "../queue/handlers/outbound-send.js";
 import type { DurablePipeline } from "../queue/pipeline.js";
 import type { InboundTextForAuthorization } from "./message-loop.js";
 import type { SpaceResolver } from "./space-resolver.js";
+import type { ConversationPresencePort } from "./conversation-presence.js";
 
 export interface DurableInboundConsumerOptions {
   operational: OperationalRepository;
@@ -19,6 +20,10 @@ export interface DurableInboundConsumerOptions {
   cipher: DataCipher;
   contentHashKey: string;
   rawMessageRetentionDays: number;
+  onSpacePersisted?: (
+    spaceId: string,
+    route: InboundTextForAuthorization["space"],
+  ) => void;
 }
 
 function retentionExpiry(receivedAt: Date, days: number): Date {
@@ -38,6 +43,7 @@ export class DurableInboundConsumer implements AuthorizedInboundConsumer {
       inbound,
       sender,
     );
+    this.options.onSpacePersisted?.(spaceId, inbound.space);
     const contentHash = createHmac("sha256", this.options.contentHashKey)
       .update("imessage-agent-message-v1\0", "utf8")
       .update(inbound.text, "utf8")
@@ -61,6 +67,7 @@ export class DurableInboundConsumer implements AuthorizedInboundConsumer {
 export interface NativeSpectrumOutboundOptions {
   operational: Pick<OperationalRepository, "getPersistedRoute">;
   resolver: SpaceResolver<Space>;
+  conversationPresence?: Pick<ConversationPresencePort, "end">;
 }
 
 /**
@@ -77,15 +84,16 @@ export class NativeSpectrumOutboundTransport implements OutboundTransport {
     text: string;
     signal: AbortSignal;
   }): Promise<{ externalMessageId: string | null }> {
+    await this.options.conversationPresence
+      ?.end(request.spaceId)
+      .catch(() => undefined);
     request.signal.throwIfAborted();
     const route = await this.options.operational.getPersistedRoute(
       request.spaceId,
     );
     const space = await this.options.resolver.resolve(route);
-    const sent = await space.responding(async () => {
-      request.signal.throwIfAborted();
-      return await space.send(text(request.text));
-    });
+    request.signal.throwIfAborted();
+    const sent = await space.send(text(request.text));
     return { externalMessageId: messageId(sent) };
   }
 }

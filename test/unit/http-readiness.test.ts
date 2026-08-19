@@ -335,11 +335,11 @@ describe("health and readiness endpoints", () => {
     const photonSetup = {
       status: () => ({
         state: "connected" as const,
-        assignedPhoneNumber: "+16285550123",
+        assignedPhoneNumber: "+1 628 555 0123",
       }),
       start: async () => ({
         state: "connected" as const,
-        assignedPhoneNumber: "+16285550123",
+        assignedPhoneNumber: "+1 628 555 0123",
       }),
     } satisfies PhotonSetupController;
     health = await startHealthServer({
@@ -362,7 +362,8 @@ describe("health and readiness endpoints", () => {
     const page = await response.text();
     expect(page).toContain("✓ Photon connected");
     expect(page).toContain("Your number:");
-    expect(page).toContain("+16285550123");
+    expect(page).toContain("+1 628 555 0123");
+    expect(page).toContain('href="sms:+16285550123"');
     expect(page).not.toContain("Supermemory");
 
     const ready = await fetch(`${base}/readyz`);
@@ -437,6 +438,12 @@ describe("health and readiness endpoints", () => {
     expect(deviceHtml).toContain("https://auth.openai.com/codex/device");
     expect(deviceHtml).toContain("ABCD-1234");
     expect(deviceHtml).toContain('data-auth-link="chatgpt"');
+    expect(deviceHtml).toContain('id="chatgpt-device-code"');
+    expect(deviceHtml).toContain(
+      'data-copy-target="chatgpt-device-code"',
+    );
+    expect(deviceHtml).toContain('data-copy-status="chatgpt-copy-status"');
+    expect(deviceHtml).toContain("Copy code");
     expect(deviceHtml).not.toContain("auth.json");
   });
 
@@ -541,8 +548,15 @@ describe("health and readiness endpoints", () => {
     expect(page).toContain("✓ Codex ready");
     expect(page).toContain("Your number:");
     expect(page).toContain("+16285550123");
+    expect(page).toContain('<span class="agent-or">or</span>');
+    expect(page).toContain('href="sms:+16285550123"');
+    expect(page).toContain("Text agent");
     expect(page).toContain("Your agent is ready.");
-    expect(page).toContain("Text it to get started.");
+    expect(page).toContain("Send “hi” to get started.");
+    expect(page).not.toContain("Text it to get started.");
+    expect(page).toContain("••••••4567");
+    expect(page).not.toContain("+15551234567");
+    expect(page).not.toContain('href="sms:+15551234567"');
     expect(page).toContain('<details id="advanced-settings"');
     expect(page).toContain("ChatGPT plan");
     expect(page).toContain('id="model-select"');
@@ -555,6 +569,48 @@ describe("health and readiness endpoints", () => {
     expect(javascript).toContain('fetch("/readyz"');
     expect(javascript).toContain("dataset.ready");
   });
+
+  it.each([undefined, "+16285550123x"])(
+    "omits the messaging action when the assigned number is %s",
+    async (assignedPhoneNumber) => {
+      const readiness = new ReadinessRegistry();
+      const spectrum = new SpectrumReadiness();
+      markCriticalComponentsReady(readiness);
+      spectrum.markConnected();
+      const photonSetup = {
+        status: () => ({
+          state: "connected" as const,
+          ...(assignedPhoneNumber === undefined
+            ? {}
+            : { assignedPhoneNumber }),
+        }),
+        start: async () => ({ state: "connected" as const }),
+      } satisfies PhotonSetupController;
+      health = await startHealthServer({
+        port: 0,
+        host: "127.0.0.1",
+        readiness,
+        deploymentIdentity: deploymentIdentity(),
+        spectrum,
+        deploymentPage: {
+          authMode: "api_key",
+          runtimeMode: "agent",
+          supermemoryConfigured: false,
+        },
+        photonSetup,
+      });
+      const address = health.server.address() as AddressInfo;
+
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/agent/dashboard`,
+      );
+      const page = await response.text();
+      expect(page).toContain("Your agent is ready.");
+      expect(page).not.toContain("Text agent");
+      expect(page).not.toContain('class="agent-or"');
+      expect(page).not.toContain('href="sms:');
+    },
+  );
 
   it("uses green Codex authentication as authoritative when App Server status is stale", async () => {
     const readiness = new ReadinessRegistry();
@@ -655,6 +711,10 @@ describe("health and readiness endpoints", () => {
     const page = await dashboard.text();
     expect(page).toContain("https://app.photon.codes/device");
     expect(page).toContain('data-auth-link="photon"');
+    expect(page).toContain('id="photon-device-code"');
+    expect(page).toContain('data-copy-target="photon-device-code"');
+    expect(page).toContain('data-copy-status="photon-copy-status"');
+    expect(page).toContain("Copy code");
   });
 
   it("exposes only the narrow setup methods and no command endpoint", async () => {

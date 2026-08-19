@@ -5,6 +5,10 @@ import {
   type SpectrumApp,
 } from "../../src/transport/spectrum.js";
 import { normalizeIMessageSender } from "../../src/transport/sender-identity.js";
+import {
+  DEFAULT_READ_RECEIPT_DELAY_MS,
+  DEFAULT_TYPING_START_DELAY_MS,
+} from "../../src/transport/read-receipts.js";
 
 const liveConfiguration = {
   enabled: process.env["SPECTRUM_LIVE_TEST"] === "true",
@@ -22,6 +26,10 @@ const configured =
     .every(([, value]) => typeof value === "string" && value.length > 0);
 
 let app: SpectrumApp | undefined;
+
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 afterEach(async () => {
   await app?.stop();
@@ -76,7 +84,7 @@ describe.skipIf(!configured)("live Spectrum Cloud authorized DM", () => {
             }
 
             if (senderAddress === normalizedExpectedSender) {
-              return space;
+              return { message, space };
             }
           }
 
@@ -94,10 +102,25 @@ describe.skipIf(!configured)("live Spectrum Cloud authorized DM", () => {
           }, 60_000);
         });
 
-        const space = await Promise.race([inbound, expired]);
-        await space.responding(async () => {
+        const { message, space } = await Promise.race([inbound, expired]);
+        let typing = false;
+        try {
+          // Manual protected check: watch the sending device transition through
+          // Delivered -> Read -> typing before the reply becomes visible.
+          await wait(DEFAULT_READ_RECEIPT_DELAY_MS);
+          await message.read();
+          await wait(DEFAULT_TYPING_START_DELAY_MS);
+          await space.startTyping();
+          typing = true;
+          await wait(1_500);
+          await space.stopTyping();
+          typing = false;
           await space.send(replyText);
-        });
+        } finally {
+          if (typing) {
+            await space.stopTyping().catch(() => undefined);
+          }
+        }
 
         expect(space.id.length).toBeGreaterThan(0);
       } finally {

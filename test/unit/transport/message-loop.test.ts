@@ -8,6 +8,7 @@ import {
   SpectrumMessageLoopError,
   type AuthorizeAndIngest,
 } from "../../../src/transport/message-loop.js";
+import { ReadReceiptDispatcher } from "../../../src/transport/read-receipts.js";
 
 function fakeSpace(
   overrides: Partial<Record<"id" | "phone" | "type", string>> = {},
@@ -73,10 +74,16 @@ describe("Spectrum message handling", () => {
       sequence.push("read");
     });
     const message = fakeMessage(space, { read });
+    const dispatcher = new ReadReceiptDispatcher();
 
     await expect(
-      handleSpectrumMessage(space, message, { authorizeAndIngest }),
+      handleSpectrumMessage(space, message, {
+        authorizeAndIngest,
+        readReceiptDispatcher: dispatcher,
+        wait: async () => undefined,
+      }),
     ).resolves.toBe("accepted");
+    await dispatcher.close();
 
     expect(authorizeAndIngest.authorizeAndIngest).toHaveBeenCalledTimes(1);
     expect(authorizeAndIngest.authorizeAndIngest).toHaveBeenCalledWith(
@@ -106,14 +113,47 @@ describe("Spectrum message handling", () => {
     const authorizeAndIngest = ingestion(async () => "duplicate");
     const space = fakeSpace();
     const read = vi.fn(async () => undefined);
+    const dispatcher = new ReadReceiptDispatcher();
 
     await expect(
       handleSpectrumMessage(space, fakeMessage(space, { read }), {
         authorizeAndIngest,
+        readReceiptDispatcher: dispatcher,
+        wait: async () => undefined,
       }),
     ).resolves.toBe("duplicate");
+    await dispatcher.close();
 
     expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads an intercepted authorized command without starting agent presence", async () => {
+    const authorizeAndIngest = ingestion(async (_inbound, context) => {
+      context.onHandledWithoutAgentPresence?.();
+      return "accepted";
+    });
+    const dispatcher = new ReadReceiptDispatcher();
+    const space = fakeSpace();
+    const read = vi.fn(async () => undefined);
+    const conversationPresence = {
+      beginRoute: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+      endRoute: vi.fn(async () => undefined),
+      reserve: vi.fn(() => 1),
+      reset: vi.fn(async () => undefined),
+    };
+
+    await handleSpectrumMessage(space, fakeMessage(space, { read }), {
+      authorizeAndIngest,
+      conversationPresence,
+      readReceiptDispatcher: dispatcher,
+      wait: async () => undefined,
+    });
+    await dispatcher.close();
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(conversationPresence.reserve).not.toHaveBeenCalled();
+    expect(conversationPresence.beginRoute).not.toHaveBeenCalled();
   });
 
   it("does not mark an unauthorized inbound message as read", async () => {

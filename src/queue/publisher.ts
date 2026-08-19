@@ -3,6 +3,9 @@ import type { PgBoss } from "pg-boss";
 import { QUEUE_NAMES } from "./names.js";
 import type {
   InboundFlushPayload,
+  ApprovalExecutePayload,
+  ApprovalRequestPayload,
+  MemoryCuratePayload,
   OutboundSendPayload,
   TaskExecutePayload,
   TurnPlanPayload,
@@ -15,6 +18,9 @@ export interface QueuePublisher {
   enqueueTaskExecute(payload: TaskExecutePayload): Promise<void>;
   enqueueTurnSynthesize(payload: TurnSynthesizePayload): Promise<void>;
   enqueueOutboundSend(payload: OutboundSendPayload): Promise<void>;
+  enqueueApprovalRequest(payload: ApprovalRequestPayload): Promise<void>;
+  enqueueApprovalExecute(payload: ApprovalExecutePayload): Promise<void>;
+  enqueueMemoryCurate(payload: MemoryCuratePayload): Promise<void>;
 }
 
 export class PgBossPublisher implements QueuePublisher {
@@ -76,17 +82,51 @@ export class PgBossPublisher implements QueuePublisher {
     );
   }
 
+  public async enqueueApprovalRequest(
+    payload: ApprovalRequestPayload,
+  ): Promise<void> {
+    await this.sendSingleton(
+      QUEUE_NAMES.approvalRequest,
+      payload,
+      `approval-request:${payload.executionTaskId}`,
+    );
+  }
+
+  public async enqueueApprovalExecute(
+    payload: ApprovalExecutePayload,
+  ): Promise<void> {
+    await this.sendSingleton(
+      QUEUE_NAMES.approvalExecute,
+      payload,
+      `approval-execute:${payload.actionExecutionId}`,
+    );
+  }
+
+  public async enqueueMemoryCurate(payload: MemoryCuratePayload): Promise<void> {
+    await this.sendSingleton(
+      QUEUE_NAMES.memoryCurate,
+      payload,
+      `memory:${payload.chainId}:${payload.expectedChainVersion}`,
+    );
+  }
+
   private async sendSingleton(
     name:
       | typeof QUEUE_NAMES.turnPlan
       | typeof QUEUE_NAMES.taskExecute
       | typeof QUEUE_NAMES.turnSynthesize
-      | typeof QUEUE_NAMES.outboundSend,
+      | typeof QUEUE_NAMES.outboundSend
+      | typeof QUEUE_NAMES.approvalRequest
+      | typeof QUEUE_NAMES.approvalExecute
+      | typeof QUEUE_NAMES.memoryCurate,
     payload:
       | TurnPlanPayload
       | TaskExecutePayload
       | TurnSynthesizePayload
-      | OutboundSendPayload,
+      | OutboundSendPayload
+      | ApprovalRequestPayload
+      | ApprovalExecutePayload
+      | MemoryCuratePayload,
     singletonKey: string,
   ): Promise<void> {
     await this.boss.send(name, payload, {

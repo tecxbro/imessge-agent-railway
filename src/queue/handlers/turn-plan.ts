@@ -25,6 +25,7 @@ import {
   type StatusHistoryEntry,
 } from "../../messaging/status-policy.js";
 import type { PermissionProfileName } from "../../security/permissions.js";
+import { CodexStartDeniedError } from "../../security/queued-authorization.js";
 import type { QueuePublisher } from "../publisher.js";
 import type { TurnPlanPayload } from "../payloads.js";
 
@@ -90,6 +91,12 @@ export interface TurnPlanRepository {
     },
   ): Promise<{ rootTasks: readonly QueuedExecutionTask[] }>;
   commitSilent(input: TurnPlanCommitBase): Promise<void>;
+  denyChainCodexStart?(input: {
+    chainId: string;
+    expectedChainVersion: number;
+    expectedState: "queued";
+    errorCode: string;
+  }): Promise<boolean>;
 }
 
 export interface TurnPlanDependencies {
@@ -99,6 +106,8 @@ export interface TurnPlanDependencies {
     QueuePublisher,
     "enqueueTaskExecute" | "enqueueOutboundSend"
   >;
+  memoryPublisher?: Pick<QueuePublisher, "enqueueMemoryCurate">;
+  reconcileMemory?: () => Promise<void>;
   commandHandlers: CommandHandlersDependencies;
   promptBundle: PromptBundle;
   encrypt(plaintext: string): Promise<string> | string;
@@ -114,6 +123,7 @@ export interface TurnPlanDependencies {
     signal: AbortSignal;
   }): Promise<void>;
   onStatusFailure?(error: unknown, chainId: string): void;
+  onPresenceEnd?(chainId: string): void;
   maximumBubbleCharacters?: number;
 }
 
@@ -239,8 +249,27 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
   ): Promise<void> => {
     // Queue payloads carry only identity/version hints. Reload every prompt,
     // routing, authorization, and capability input from authoritative storage.
-    const context = await dependencies.repository.loadPlanContext(payload);
+    let context: TurnPlanContext | null;
+    try {
+      context = await dependencies.repository.loadPlanContext(payload);
+    } catch (error) {
+      if (
+        error instanceof CodexStartDeniedError &&
+        dependencies.repository.denyChainCodexStart !== undefined
+      ) {
+        await dependencies.repository.denyChainCodexStart({
+          chainId: payload.chainId,
+          expectedChainVersion: payload.expectedChainVersion,
+          expectedState: "queued",
+          errorCode: error.code,
+        });
+        dependencies.onPresenceEnd?.(payload.chainId);
+        return;
+      }
+      throw error;
+    }
     if (context === null) {
+      await dependencies.reconcileMemory?.();
       return;
     }
 
@@ -279,21 +308,40 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
     }
 
     const memory = await dependencies.recallMemory(context, signal);
-    const run = await dependencies.interaction.run({
-      ownerId: context.ownerId,
-      spaceId: context.spaceId,
-      modelProfile: asCodexModelProfile(context.modelSelection),
-      workingDirectory: context.interactionWorkingDirectory,
-      sections: interactionSections(
-        context,
-        memory,
-        dependencies.promptBundle,
-      ),
-      ...(context.recoverySummary === undefined
-        ? {}
-        : { recoverySummary: context.recoverySummary }),
-      signal,
-    });
+    let run: Awaited<ReturnType<TurnPlanDependencies["interaction"]["run"]>>;
+    try {
+      run = await dependencies.interaction.run({
+        chainId: context.chainId,
+        ownerId: context.ownerId,
+        spaceId: context.spaceId,
+        modelProfile: asCodexModelProfile(context.modelSelection),
+        workingDirectory: context.interactionWorkingDirectory,
+        sections: interactionSections(
+          context,
+          memory,
+          dependencies.promptBundle,
+        ),
+        ...(context.recoverySummary === undefined
+          ? {}
+          : { recoverySummary: context.recoverySummary }),
+        signal,
+      });
+    } catch (error) {
+      if (
+        error instanceof CodexStartDeniedError &&
+        dependencies.repository.denyChainCodexStart !== undefined
+      ) {
+        await dependencies.repository.denyChainCodexStart({
+          chainId: context.chainId,
+          expectedChainVersion: context.chainVersion,
+          expectedState: "queued",
+          errorCode: error.code,
+        });
+        dependencies.onPresenceEnd?.(context.chainId);
+        return;
+      }
+      throw error;
+    }
     signal.throwIfAborted();
     const decision = interactionDecisionSchema.parse(run.decision);
     const base: TurnPlanCommitBase = {
@@ -325,6 +373,12 @@ export function createTurnPlanHandler(dependencies: TurnPlanDependencies) {
 
     if (decision.mode === "silent") {
       await dependencies.repository.commitSilent(base);
+      await dependencies.memoryPublisher?.enqueueMemoryCurate({
+        chainId: context.chainId,
+        expectedChainVersion: context.chainVersion,
+        expectedState: "complete",
+      });
+      dependencies.onPresenceEnd?.(context.chainId);
       return;
     }
 

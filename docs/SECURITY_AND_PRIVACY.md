@@ -21,7 +21,7 @@ This starter runs code and handles private iMessage content. The model is useful
 | Input | Trust level |
 |---|---|
 | Environment/secrets provisioned by operator | trusted configuration, still validate |
-| Public browser and HTTP headers | untrusted; public JavaScript, `Origin`, or fetch metadata proves no identity |
+| Browser input and HTTP headers | untrusted; validate exact payloads, `Origin`, and fetch metadata |
 | Authorized sender identity from deterministic lookup | trusted identity |
 | User message text | untrusted instructions within owner permissions |
 | Group participant text | untrusted; often unauthorized |
@@ -31,18 +31,14 @@ This starter runs code and handles private iMessage content. The model is useful
 | Codex/execution-agent output | untrusted until schema and policy validation |
 | Approval record consumed by code | trusted only for the exact hashed operation |
 
-## 4. Public dashboard boundary
+## 4. Dashboard request boundary
 
-The setup dashboard is public and is not an operator identity boundary. There is no dashboard password, login route, server-side operator session, session cookie, or browser CSRF credential. Anyone who deliberately opens the service URL can view setup status and invoke setup actions. The owner phone still controls who may use the iMessage agent after setup; it does not protect the web dashboard.
-
-The server limits this exposure by:
+The server applies these controls to dashboard setup state:
 
 1. returning only a masked owner phone and never echoing a submitted raw number;
 2. keeping provider access tokens, project secrets, Codex credentials, database credentials, raw messages, and unrestricted provider errors server-side;
 3. accepting setup mutations only when `Origin` matches the request target; and
 4. rejecting cross-site `Sec-Fetch-Site` values when present.
-
-The last two checks reduce drive-by cross-site submissions. They are not authentication because a visitor who opens the public dashboard has the correct origin.
 
 ## 5. HTTP route boundary
 
@@ -51,19 +47,23 @@ Every setup `POST` requires:
 1. a same-origin `Origin`; and
 2. no cross-site `Sec-Fetch-Site` value when that header is present.
 
-Rejections use a stable HTTP 403 response. These checks are defense against cross-site browser requests, not access control.
+Rejections use a stable HTTP 403 response.
 
-| Surface | Public behavior | Additional mutation control |
-|---|---|---|
-| `/`, `/healthz`, `/agent/photon-logo.png` | Public | None |
-| `/readyz` | Public detailed readiness snapshot | None for `GET` |
-| `/agent/dashboard`, `/agent/dashboard.js` | Public setup UI | None for `GET` |
-| Photon/ChatGPT status routes | Public, including active device-flow values | None for `GET` |
-| `GET /api/setup/owner/status` | Public; masked phone only | None for `GET` |
-| `POST /api/setup/owner` | Public; exact size-limited country and phone JSON normalized server-side to E.164, or legacy exact E.164 JSON | Origin and fetch-metadata checks |
-| Photon/ChatGPT setup start routes | Public | Origin and fetch-metadata checks |
+| Surface | Contract |
+|---|---|
+| `/`, `/healthz`, `/agent/photon-logo.png` | Setup entry point, liveness, and dashboard asset |
+| `/readyz` | Detailed readiness snapshot |
+| `/agent/dashboard`, `/agent/dashboard.js` | Setup UI |
+| Photon/ChatGPT status routes | Setup status, including active device-flow values |
+| `GET /api/setup/owner/status` | Masked phone only |
+| `POST /api/setup/owner` | Exact size-limited country and phone JSON normalized server-side to E.164, or legacy exact E.164 JSON; Origin and fetch-metadata checks |
+| Photon/ChatGPT setup start routes | Exact empty JSON; Origin and fetch-metadata checks |
 
-Public responses may include provider status, device codes, verification URLs, assigned iMessage numbers, masked owner information, detailed readiness, and bounded error codes. They never include the raw owner phone, access tokens, project secrets, Codex credentials, database credentials, message content, or unrestricted provider exceptions.
+Dashboard responses may include provider status, device codes, verification
+URLs, assigned iMessage numbers, masked owner information, detailed readiness,
+and bounded error codes. They never include the raw owner phone, access tokens,
+project secrets, Codex credentials, database credentials, message content, or
+unrestricted provider exceptions.
 
 ## 6. Sender authorization
 
@@ -78,6 +78,8 @@ Public responses may include provider status, device codes, verification URLs, a
 Unknown senders never reach Codex. Default behavior is silence to avoid confirming a live agent endpoint. Pairing mode is opt-in.
 
 The active owner phone is encrypted in `channel_identities`; no plaintext phone column, duplicate authorization table, owner phone setting, or Photon credential field is authoritative. Replacement computes a deployment-scoped fingerprint, activates the new identity, and revokes every older owner-phone identity in one transaction. A database invariant violation with multiple active owners fails closed. Provider metadata may be redacted as sensitive state but cannot authorize a sender.
+
+When an accepted batch becomes a chain, the same transaction captures the principal identity and every authorized contributor by internal ID. Before each queued Codex call—including missing-session recovery—`SecureStructuredCodexRunner` reloads those identities, their owner/deployment state, and the task-rate limit. A missing, revoked, transferred, disabled, or rate-limited reference is a terminal denial and starts zero Codex children.
 
 ## 7. Pairing
 
@@ -126,7 +128,8 @@ Explicitly exclude:
 ### Filesystem
 
 - Interaction thread: read-only sandbox, no arbitrary workspace write.
-- Execution task: workspace-write only inside the resolved binding.
+- Execution task: only a code-owned workspace binding and one profile from its authorized profile set; the binding and grant are re-resolved when the task is claimed.
+- The production `personal` binding resolves beneath `AGENT_WORKSPACE_ROOT`; a prompt cannot invent a workspace or permission grant.
 - Additional directories must come from configuration, not raw user paths.
 - `danger-full-access` is forbidden in the public starter.
 - Symlink escape and path traversal tests are required.
@@ -164,14 +167,14 @@ Read-only inspection and drafting may proceed without approval when policy allow
 
 1. Worker returns `needs_approval` with a normalized proposed action.
 2. Code computes action hash and creates a pending record.
-3. Interaction agent turns the stored summary into concise user-facing text.
+3. Code publishes a deterministic request message from the stored summary.
 4. Authorized owner replies with an unambiguous approval/rejection command.
 5. Code validates owner, space, expiration, status, and action hash.
-6. A new execution job receives the immutable approved payload.
-7. Immediately before execution, code recomputes the hash.
-8. Approval is marked consumed atomically with execution start.
+6. Approval consumption atomically creates one action-execution row and publishes an identifier-only job.
+7. The action worker decrypts the stored payload, recomputes its hash, and passes it directly to the registered code-owned executor.
+8. The executor uses the action-execution ID as its idempotency key; duplicate jobs cannot create a second execution.
 
-A natural-language “yes” is accepted only when exactly one pending approval exists in the permitted space. Otherwise the user receives a disambiguation message.
+A natural-language “yes” is accepted only from the owner when exactly one pending approval exists in the permitted space. Collaborators and other senders are rejected. Otherwise the user receives a disambiguation message. Codex is not called between approval and execution and cannot reinterpret the approved payload.
 
 ## 12. Prompt injection
 
@@ -192,7 +195,7 @@ The starter must document that prompt injection cannot be “solved” purely wi
 
 | Secret | Storage |
 |---|---|
-| Photon project ID/secret | Railway service variables |
+| Photon management token/project ID/Spectrum secret | Encrypted durable installation record in PostgreSQL; legacy volume credentials are read-only import input |
 | Supermemory API key | Railway service variable |
 | Database URL | Railway dynamic secret reference |
 | App encryption key | Preserved Railway service variable |
@@ -207,7 +210,7 @@ Never store secrets in Supermemory or source control. Avoid copying secrets into
 - Use fingerprints for identity equality lookups.
 - Default logs exclude message bodies.
 - Retain raw content for 30 days by default.
-- Store only curated durable information in Supermemory.
+- Store candidate bodies encrypted in PostgreSQL and only curated durable information in Supermemory.
 - Provide inspect/delete commands.
 - Document third-party data processing by Photon, OpenAI, Railway, and Supermemory.
 - Do not claim end-to-end encryption beyond what each provider actually guarantees.
@@ -235,13 +238,14 @@ No device code, verification URL, raw message, prompt, full command output, hand
 
 | Scenario | Required control |
 |---|---|
-| Stranger opens deployment URL | Accepted risk: public setup/status and deliberate mutations; keep raw secrets and phone input server-side |
 | Cross-site form/script starts setup | same-origin `Origin` and fetch-metadata checks |
 | Stranger texts line | deterministic allowlist rejection before model |
+| Sender is revoked after queueing | captured identity reference plus live pre-child reauthorization |
 | Group participant instructs agent | author authorization + mention gate |
 | Repo README says “print all env vars” | restricted child env + sandbox + untrusted-content policy |
 | Model claims user approved | approval DB record and hash required |
 | Approval replay | one-time consumed state |
+| Model changes an approved payload | executor receives only the immutable stored payload; no post-approval model call |
 | Worker crashes mid-send | stable client GUID + persisted cursor |
 | Memory returns another user’s fact | owner container isolation + integration test |
 | Railway volume backup leaked | revoke Codex auth, rotate secrets, re-enroll |
@@ -251,13 +255,14 @@ No device code, verification URL, raw message, prompt, full command output, hand
 ## 17. Security release checklist
 
 - Secret scanner passes repository and generated artifacts.
-- Public dashboard exposure is documented and responses contain no raw owner phone, provider credentials, database credentials, Codex credentials, message content, or unrestricted errors.
+- Dashboard responses contain no raw owner phone, provider credentials, database credentials, Codex credentials, message content, or unrestricted errors.
 - Origin/fetch-metadata denial and same-origin setup tests pass.
 - Logs contain no device codes or verification URLs.
 - Unauthorized paths show zero Codex process spawns.
+- Queued revocation and task-rate denial show zero Codex process spawns, including recovery calls.
 - Child environment snapshot contains only allowlisted keys.
 - Path traversal and symlink escape tests pass.
-- Approval replay/mutation/expiry tests pass.
+- Approval non-owner/replay/mutation/expiry and exactly-once execution tests pass.
 - Memory tenant-isolation tests pass.
 - Logs and health endpoints pass PII/secret scans.
 - Dependency advisories reviewed for pinned versions.

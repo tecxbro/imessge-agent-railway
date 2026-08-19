@@ -191,7 +191,7 @@ describe("composed service lifecycle recovery", () => {
     expect(internalReadiness).toMatchObject({
       components: {
         spectrum: {
-          code: "SPECTRUM_STREAM_DISCONNECTED",
+          code: "SPECTRUM_STREAM_RESTART_EXHAUSTED",
           state: "degraded",
         },
       },
@@ -516,7 +516,7 @@ describe("composed service lifecycle recovery", () => {
     });
   });
 
-  it("runs one readiness probe for a production-shaped catalog change", async () => {
+  it("leaves catalog subscription and reconciliation to ModelSettingsService", async () => {
     let capabilitiesListener:
       | Parameters<ChatGptSetupController["onCapabilitiesChanged"]>[0]
       | undefined;
@@ -589,10 +589,9 @@ describe("composed service lifecycle recovery", () => {
     expect(startSpectrum).toHaveBeenCalledOnce();
 
     await publishCatalogChange();
-    await vi.waitFor(() => expect(checkCodex).toHaveBeenCalledTimes(2));
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(checkCodex).toHaveBeenCalledTimes(2);
-    expect(refreshCapabilities).toHaveBeenCalledTimes(2);
+    expect(checkCodex).toHaveBeenCalledOnce();
+    expect(refreshCapabilities).toHaveBeenCalledOnce();
     expect(startSpectrum).toHaveBeenCalledOnce();
     await expect(fetchReadiness(service)).resolves.toMatchObject({
       status: 200,
@@ -600,6 +599,6 @@ describe("composed service lifecycle recovery", () => {
     });
 
     await service.shutdown("test");
-    expect(listenerDisposed).toBe(true);
+    expect(listenerDisposed).toBe(false);
   });
 });

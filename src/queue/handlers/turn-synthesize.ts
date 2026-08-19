@@ -16,6 +16,7 @@ import { splitMessageBubbles } from "../../messaging/bubble-splitter.js";
 import { assertUserFacingMessageSafe } from "../../messaging/user-visible-policy.js";
 import type { QueuePublisher } from "../publisher.js";
 import type { TurnSynthesizePayload } from "../payloads.js";
+import { CodexStartDeniedError } from "../../security/queued-authorization.js";
 
 export interface UserSafeProposedAction {
   actionType: string;
@@ -95,6 +96,12 @@ export interface TurnSynthesisRepository {
     promptSha256: string;
     encryptedParts: readonly string[];
   }): Promise<{ outboundBatchId: string }>;
+  denyChainCodexStart?(input: {
+    chainId: string;
+    expectedChainVersion: number;
+    expectedState: "executing";
+    errorCode: string;
+  }): Promise<boolean>;
 }
 
 export interface TurnSynthesizeDependencies {
@@ -104,6 +111,7 @@ export interface TurnSynthesizeDependencies {
   promptBundle: PromptBundle;
   encrypt(plaintext: string): Promise<string> | string;
   maximumBubbleCharacters?: number;
+  onPresenceEnd?(chainId: string): void;
 }
 
 function synthesisSections(
@@ -191,7 +199,25 @@ export function createTurnSynthesizeHandler(
   ): Promise<void> => {
     // Synthesis consumes terminal durable results and materializes every bubble
     // before publishing delivery, preventing a retry from regenerating text.
-    const context = await dependencies.repository.loadSynthesisContext(payload);
+    let context: TurnSynthesisContext | null;
+    try {
+      context = await dependencies.repository.loadSynthesisContext(payload);
+    } catch (error) {
+      if (
+        error instanceof CodexStartDeniedError &&
+        dependencies.repository.denyChainCodexStart !== undefined
+      ) {
+        await dependencies.repository.denyChainCodexStart({
+          chainId: payload.chainId,
+          expectedChainVersion: payload.expectedChainVersion,
+          expectedState: "executing",
+          errorCode: error.code,
+        });
+        dependencies.onPresenceEnd?.(payload.chainId);
+        return;
+      }
+      throw error;
+    }
     if (context === null) {
       return;
     }
@@ -199,21 +225,42 @@ export function createTurnSynthesizeHandler(
       executionResultSchema.parse(result),
     );
     const safeResults = buildUserSafeSynthesisInput(terminalResults);
-    const run = await dependencies.interaction.run({
-      ownerId: context.ownerId,
-      spaceId: context.spaceId,
-      modelProfile: asCodexModelProfile(context.modelSelection),
-      workingDirectory: context.interactionWorkingDirectory,
-      sections: synthesisSections(
-        context,
-        safeResults,
-        dependencies.promptBundle,
-      ),
-      ...(context.recoverySummary === undefined
-        ? {}
-        : { recoverySummary: context.recoverySummary }),
-      signal,
-    });
+    let run: Awaited<
+      ReturnType<TurnSynthesizeDependencies["interaction"]["run"]>
+    >;
+    try {
+      run = await dependencies.interaction.run({
+        chainId: context.chainId,
+        ownerId: context.ownerId,
+        spaceId: context.spaceId,
+        modelProfile: asCodexModelProfile(context.modelSelection),
+        workingDirectory: context.interactionWorkingDirectory,
+        sections: synthesisSections(
+          context,
+          safeResults,
+          dependencies.promptBundle,
+        ),
+        ...(context.recoverySummary === undefined
+          ? {}
+          : { recoverySummary: context.recoverySummary }),
+        signal,
+      });
+    } catch (error) {
+      if (
+        error instanceof CodexStartDeniedError &&
+        dependencies.repository.denyChainCodexStart !== undefined
+      ) {
+        await dependencies.repository.denyChainCodexStart({
+          chainId: context.chainId,
+          expectedChainVersion: context.chainVersion,
+          expectedState: "executing",
+          errorCode: error.code,
+        });
+        dependencies.onPresenceEnd?.(context.chainId);
+        return;
+      }
+      throw error;
+    }
     signal.throwIfAborted();
     let decision = interactionDecisionSchema.parse(run.decision);
     if (decision.mode !== "direct" && decision.mode !== "confirm") {

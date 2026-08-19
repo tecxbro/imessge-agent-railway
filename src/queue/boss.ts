@@ -12,6 +12,8 @@ const QUEUE_POLICIES: Readonly<Record<QueueName, QueuePolicy>> = {
   [QUEUE_NAMES.taskExecute]: "exclusive",
   [QUEUE_NAMES.turnSynthesize]: "exclusive",
   [QUEUE_NAMES.outboundSend]: "exclusive",
+  [QUEUE_NAMES.approvalRequest]: "exclusive",
+  [QUEUE_NAMES.approvalExecute]: "exclusive",
   [QUEUE_NAMES.memoryCurate]: "exclusive",
   [QUEUE_NAMES.maintenanceRetention]: "exclusive",
   [QUEUE_NAMES.maintenanceHealth]: "exclusive",
@@ -107,6 +109,16 @@ export class DurableQueue {
         "0 3 * * *",
         {},
         { tz: "UTC", key: "daily-retention", singletonKey: "daily-retention" },
+      );
+      await this.boss.schedule(
+        QUEUE_NAMES.maintenanceHealth,
+        "* * * * *",
+        {},
+        {
+          tz: "UTC",
+          key: "approval-expiry-sweep",
+          singletonKey: "approval-expiry-sweep",
+        },
       );
       this.started = true;
     } catch (error) {

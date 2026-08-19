@@ -46,5 +46,30 @@ export const proposedActionSchema = z
   })
   .strict();
 
+/**
+ * The only action shape that may cross the approval-to-provider boundary.
+ * Human/model commentary is deliberately absent.
+ */
+export const normalizedApprovedActionSchema = z
+  .object({
+    actionType: actionTypeSchema,
+    target: boundedTextSchema(512),
+    normalizedPayload: jsonValueSchema,
+  })
+  .strict();
+
+/** Persisted encrypted envelope retained for compatibility with v1 approvals. */
+export const storedActionEnvelopeSchema = z
+  .object({
+    actionType: actionTypeSchema,
+    target: boundedTextSchema(512),
+    payload: jsonValueSchema,
+  })
+  .strict();
+
 export type ActionType = z.infer<typeof actionTypeSchema>;
 export type ProposedAction = z.infer<typeof proposedActionSchema>;
+export type NormalizedApprovedAction = z.infer<
+  typeof normalizedApprovedActionSchema
+>;
+export type StoredActionEnvelope = z.infer<typeof storedActionEnvelopeSchema>;

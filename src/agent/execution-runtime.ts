@@ -15,19 +15,20 @@ import {
 } from "./schemas.js";
 import type { ModelProfile } from "../config/model-profiles.js";
 import {
-  enforcePermissionGrant,
-  type PermissionProfileName,
-} from "../security/permissions.js";
+  enforcePermissionGrantSet,
+} from "../security/permission-grants.js";
+import type { PermissionProfileName } from "../security/permissions.js";
 import { buildPrompt, type PromptSection } from "./prompt-builder.js";
 import type { ThreadStore } from "./thread-store.js";
 
 export interface ExecutionRuntimeRequest {
+  chainId: string;
   ownerId: string;
   task: ExecutionTask;
-  /** Code-owned ceiling; model output can request only a subset of this grant. */
-  maximumPermissionProfile: PermissionProfileName;
+  /** Exact code-owned set; permission profiles do not imply one another. */
+  authorizedPermissionProfiles: readonly PermissionProfileName[];
   modelProfile: ModelProfile;
-  workspaceRoot: string;
+  resolvedWorkspacePath: string;
   policySections: readonly PromptSection[];
   recoverySummary?: string;
   signal?: AbortSignal;
@@ -41,39 +42,6 @@ export interface ExecutionRuntimeRunResult {
   promptSha256: string;
   usage: Usage | null;
   recovered: boolean;
-}
-
-async function resolveWorkspace(
-  workspaceRoot: string,
-  binding: string,
-): Promise<string> {
-  if (!isAbsolute(workspaceRoot)) {
-    throw new Error(
-      "AGENT_WORKSPACE_ROOT must be absolute before an execution task can start.",
-    );
-  }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(binding)) {
-    throw new Error("The execution workspace binding is invalid.");
-  }
-
-  const root = await realpath(workspaceRoot);
-  const candidate = resolve(root, binding);
-  const resolved = await realpath(candidate);
-  const relation = relative(root, resolved);
-  if (
-    relation === "" ||
-    relation.startsWith("..") ||
-    isAbsolute(relation)
-  ) {
-    throw new Error(
-      "The execution workspace resolved outside AGENT_WORKSPACE_ROOT. Repair the binding or symlink before retrying.",
-    );
-  }
-  const workspace = await stat(resolved);
-  if (!workspace.isDirectory()) {
-    throw new Error("The execution workspace binding is not a directory.");
-  }
-  return resolved;
 }
 
 async function validateArtifactContainment(
@@ -152,10 +120,13 @@ export class ExecutionRuntime {
     // Resolve the code-owned workspace and maximum permission grant before any
     // untrusted task purpose or instructions reach Codex.
     const binding = request.task.workspaceBinding ?? request.task.agentName;
-    const workspace = await resolveWorkspace(request.workspaceRoot, binding);
-    const permissionProfile = enforcePermissionGrant(
+    const workspace = await realpath(request.resolvedWorkspacePath);
+    if (!(await stat(workspace)).isDirectory()) {
+      throw new Error("The authorized execution workspace is not a directory.");
+    }
+    const permissionProfile = enforcePermissionGrantSet(
       request.task.permissionProfile,
-      request.maximumPermissionProfile,
+      new Set(request.authorizedPermissionProfiles),
     );
     const prompt = buildPrompt({
       title: `Bounded execution task ${request.task.id}`,
@@ -176,6 +147,7 @@ export class ExecutionRuntime {
 
     try {
       const turn = await this.threads.run({
+        authorizationChainId: request.chainId,
         scope: {
           kind: "executor",
           ownerId: request.ownerId,

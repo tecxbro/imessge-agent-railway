@@ -10,11 +10,13 @@ import {
 import { z } from "zod";
 
 import {
-  actionTypeSchema,
   jsonValueSchema,
+  normalizedApprovedActionSchema,
   proposedActionSchema,
+  storedActionEnvelopeSchema,
   type ActionType,
   type JsonValue,
+  type NormalizedApprovedAction,
   type ProposedAction,
 } from "./action-schema.js";
 import type { SenderRole } from "./authorize-sender.js";
@@ -23,13 +25,6 @@ const ACTION_HASH_DOMAIN = "imessage-agent-approved-action-v1";
 export const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1_000;
 
 const uuidSchema = z.uuid();
-const storedActionEnvelopeSchema = z
-  .object({
-    actionType: actionTypeSchema,
-    target: z.string().trim().min(1).max(512),
-    payload: jsonValueSchema,
-  })
-  .strict();
 
 export interface ApprovalScope {
   ownerId: string;
@@ -81,6 +76,51 @@ export interface ApprovalActor {
   canApprove: boolean;
 }
 
+export interface ApprovalRunnableTask {
+  taskId: string;
+  chainId: string;
+  expectedChainVersion: number;
+  expectedState: "queued";
+}
+
+export interface ApprovalChainProgression {
+  chainId: string;
+  expectedChainVersion: number;
+  newlyRunnableTasks: readonly ApprovalRunnableTask[];
+  shouldSynthesize: boolean;
+}
+
+export interface ApprovalResponseOutcome {
+  changed: boolean;
+  progression: ApprovalChainProgression | null;
+}
+
+export interface ApprovalExpiryOutcome {
+  expiredCount: number;
+  progressions: readonly ApprovalChainProgression[];
+}
+
+export interface ApprovalResponsePersistenceInput {
+  approvalId: string;
+  ownerId: string;
+  spaceId: string;
+  approvedByIdentityId?: string;
+  status: "approved" | "rejected";
+  now: Date;
+}
+
+export interface ConsumeApprovedActionPersistenceInput {
+  approvalId: string;
+  ownerId: string;
+  spaceId: string;
+  executionTaskId: string;
+  expectedActionHash: string;
+  expectedPayloadCiphertext: string;
+  actionExecutionId: string;
+  actionType: ActionType;
+  now: Date;
+}
+
 export interface ApprovalPersistence {
   createPending(input: CreateStoredApprovalInput): Promise<string>;
   findBound(
@@ -93,24 +133,19 @@ export interface ApprovalPersistence {
     spaceId: string,
     now: Date,
   ): Promise<StoredApprovalRecord[]>;
-  compareAndSetResponse(input: {
-    approvalId: string;
-    ownerId: string;
-    spaceId: string;
-    approvedByIdentityId?: string;
-    status: "approved" | "rejected";
-    now: Date;
-  }): Promise<boolean>;
-  consumeApprovedAction(input: {
-    approvalId: string;
-    ownerId: string;
-    spaceId: string;
-    executionTaskId: string;
-    expectedActionHash: string;
-    expectedPayloadCiphertext: string;
-    now: Date;
-  }): Promise<boolean>;
+  compareAndSetResponse(input: ApprovalResponsePersistenceInput): Promise<boolean>;
+  compareAndSetResponseWithProgression?(
+    input: ApprovalResponsePersistenceInput,
+  ): Promise<ApprovalResponseOutcome>;
+  consumeApprovedAction(
+    input: ConsumeApprovedActionPersistenceInput,
+  ): Promise<boolean>;
   expireStale(ownerId: string, spaceId: string, now: Date): Promise<number>;
+  expireStaleWithProgression?(
+    ownerId: string,
+    spaceId: string,
+    now: Date,
+  ): Promise<ApprovalExpiryOutcome>;
 }
 
 export interface ApprovalPayloadCipher {
@@ -272,7 +307,7 @@ const ACTION_EFFECTS: Record<ActionType, string> = {
 };
 
 function confirmationSummary(action: ProposedAction): string {
-  return `${action.actionType} on ${action.target}. ${ACTION_EFFECTS[action.actionType]}`;
+  return `${action.actionType} on ${JSON.stringify(action.target)}. ${ACTION_EFFECTS[action.actionType]}`;
 }
 
 function deepFreeze<Value>(value: Value): Value {
@@ -285,14 +320,50 @@ function deepFreeze<Value>(value: Value): Value {
   return value;
 }
 
+export interface EncryptedStoredActionBinding {
+  ownerId: string;
+  spaceId: string;
+  executionTaskId: string;
+  actionType: string;
+  actionHash: string;
+  normalizedPayloadCiphertext: string;
+}
+
+/**
+ * Authenticates, parses, and re-hashes an encrypted stored action. Callers get
+ * only the normalized provider input and never model commentary.
+ */
+export function decryptStoredApprovedAction(
+  binding: EncryptedStoredActionBinding,
+  cipher: ApprovalPayloadCipher,
+): Readonly<NormalizedApprovedAction> | undefined {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(cipher.decrypt(binding.normalizedPayloadCiphertext)) as unknown;
+  } catch {
+    return undefined;
+  }
+  const envelope = storedActionEnvelopeSchema.safeParse(raw);
+  if (!envelope.success || envelope.data.actionType !== binding.actionType) {
+    return undefined;
+  }
+  const action = normalizedApprovedActionSchema.parse({
+    actionType: envelope.data.actionType,
+    target: envelope.data.target,
+    normalizedPayload: envelope.data.payload,
+  });
+  const recomputedHash = hashApprovedAction(binding, action);
+  if (!hashesEqual(recomputedHash, binding.actionHash)) {
+    return undefined;
+  }
+  return deepFreeze(structuredClone(action));
+}
+
 export interface ConsumedApprovedAction {
   approvalId: string;
+  actionExecutionId: string;
   executionTaskId: string;
-  action: Readonly<{
-    actionType: ActionType;
-    target: string;
-    normalizedPayload: JsonValue;
-  }>;
+  action: Readonly<NormalizedApprovedAction>;
 }
 
 export class ApprovalService {
@@ -338,20 +409,62 @@ export class ApprovalService {
       humanSummary,
       expiresAt,
     });
+
+    let requestId: string = id;
+    let requestAction: Readonly<NormalizedApprovedAction> = action;
+    let requestSummary = humanSummary;
+    let requestExpiresAt = expiresAt;
     if (storedId !== id) {
-      throw new Error("Approval persistence changed the code-owned request ID.");
+      const existing = await this.persistence.findBound(
+        storedId,
+        parsedScope.ownerId,
+        parsedScope.spaceId,
+      );
+      if (
+        existing === undefined ||
+        existing.chainId !== parsedScope.chainId ||
+        existing.executionTaskId !== parsedScope.executionTaskId ||
+        existing.status !== "pending" ||
+        existing.expiresAt.getTime() <= now.getTime() ||
+        existing.normalizedPayloadCiphertext === null ||
+        !hashesEqual(existing.actionHash, actionHash)
+      ) {
+        throw new Error(
+          "Approval idempotency lookup returned a non-pending or differently bound request.",
+        );
+      }
+      const storedAction = decryptStoredApprovedAction(
+        {
+          ownerId: existing.ownerId,
+          spaceId: existing.spaceId,
+          executionTaskId: existing.executionTaskId,
+          actionType: existing.actionType,
+          actionHash: existing.actionHash,
+          normalizedPayloadCiphertext: existing.normalizedPayloadCiphertext,
+        },
+        this.cipher,
+      );
+      if (storedAction === undefined) {
+        throw new Error(
+          "The idempotent approval record failed exact encrypted action validation.",
+        );
+      }
+      requestId = existing.id;
+      requestAction = storedAction;
+      requestSummary = existing.humanSummary;
+      requestExpiresAt = existing.expiresAt;
     }
 
     return deepFreeze({
-      id,
+      id: requestId,
       ownerId: parsedScope.ownerId,
       spaceId: parsedScope.spaceId,
       requestedByTaskId: parsedScope.executionTaskId,
-      actionType: action.actionType,
-      normalizedPayload: structuredClone(action.normalizedPayload),
+      actionType: requestAction.actionType,
+      normalizedPayload: structuredClone(requestAction.normalizedPayload),
       actionHash,
-      humanSummary,
-      expiresAt: expiresAt.toISOString(),
+      humanSummary: requestSummary,
+      expiresAt: requestExpiresAt.toISOString(),
       status: "pending" as const,
     });
   }
@@ -372,17 +485,50 @@ export class ApprovalService {
     approvalId: string,
     status: "approved" | "rejected",
   ): Promise<boolean> {
+    return (await this.respondWithProgression(actor, spaceId, approvalId, status))
+      .changed;
+  }
+
+  public async respondWithProgression(
+    actor: ApprovalActor,
+    spaceId: string,
+    approvalId: string,
+    status: "approved" | "rejected",
+  ): Promise<ApprovalResponseOutcome> {
     this.requireOwnerActor(actor);
     uuidSchema.parse(spaceId);
     uuidSchema.parse(approvalId);
-    return this.persistence.compareAndSetResponse({
+    const input: ApprovalResponsePersistenceInput = {
       approvalId,
       ownerId: actor.ownerId,
       spaceId,
       approvedByIdentityId: actor.identityId,
       status,
       now: this.now(),
-    });
+    };
+    if (this.persistence.compareAndSetResponseWithProgression !== undefined) {
+      return this.persistence.compareAndSetResponseWithProgression(input);
+    }
+    return {
+      changed: await this.persistence.compareAndSetResponse(input),
+      progression: null,
+    };
+  }
+
+  public async expireWithProgression(
+    ownerId: string,
+    spaceId: string,
+  ): Promise<ApprovalExpiryOutcome> {
+    uuidSchema.parse(ownerId);
+    uuidSchema.parse(spaceId);
+    const now = this.now();
+    if (this.persistence.expireStaleWithProgression !== undefined) {
+      return this.persistence.expireStaleWithProgression(ownerId, spaceId, now);
+    }
+    return {
+      expiredCount: await this.persistence.expireStale(ownerId, spaceId, now),
+      progressions: [],
+    };
   }
 
   /**
@@ -393,6 +539,7 @@ export class ApprovalService {
     approvalId: string,
     ownerId: string,
     spaceId: string,
+    expectedExecutionTaskId?: string,
   ): Promise<ConsumedApprovedAction | undefined> {
     const now = this.now();
     const record = await this.persistence.findBound(
@@ -404,39 +551,29 @@ export class ApprovalService {
       record === undefined ||
       record.status !== "approved" ||
       record.expiresAt.getTime() <= now.getTime() ||
-      record.normalizedPayloadCiphertext === null
+      record.normalizedPayloadCiphertext === null ||
+      (expectedExecutionTaskId !== undefined &&
+        record.executionTaskId !== uuidSchema.parse(expectedExecutionTaskId))
     ) {
       await this.persistence.expireStale(ownerId, spaceId, now);
       return undefined;
     }
 
-    let raw: unknown;
-    try {
-      raw = JSON.parse(
-        this.cipher.decrypt(record.normalizedPayloadCiphertext),
-      ) as unknown;
-    } catch {
-      return undefined;
-    }
-    const parsed = storedActionEnvelopeSchema.safeParse(raw);
-    if (!parsed.success || parsed.data.actionType !== record.actionType) {
-      return undefined;
-    }
-    const recomputedHash = hashApprovedAction(
+    const action = decryptStoredApprovedAction(
       {
         ownerId: record.ownerId,
         spaceId: record.spaceId,
         executionTaskId: record.executionTaskId,
+        actionType: record.actionType,
+        actionHash: record.actionHash,
+        normalizedPayloadCiphertext: record.normalizedPayloadCiphertext,
       },
-      {
-        actionType: parsed.data.actionType,
-        target: parsed.data.target,
-        normalizedPayload: parsed.data.payload,
-      },
+      this.cipher,
     );
-    if (!hashesEqual(recomputedHash, record.actionHash)) {
+    if (action === undefined) {
       return undefined;
     }
+    const actionExecutionId = randomUUID();
     const consumed = await this.persistence.consumeApprovedAction({
       approvalId: record.id,
       ownerId: record.ownerId,
@@ -444,6 +581,8 @@ export class ApprovalService {
       executionTaskId: record.executionTaskId,
       expectedActionHash: record.actionHash,
       expectedPayloadCiphertext: record.normalizedPayloadCiphertext,
+      actionExecutionId,
+      actionType: action.actionType,
       now,
     });
     if (!consumed) {
@@ -451,12 +590,9 @@ export class ApprovalService {
     }
     return deepFreeze({
       approvalId: record.id,
+      actionExecutionId,
       executionTaskId: record.executionTaskId,
-      action: {
-        actionType: parsed.data.actionType,
-        target: parsed.data.target,
-        normalizedPayload: structuredClone(parsed.data.payload),
-      },
+      action,
     });
   }
 

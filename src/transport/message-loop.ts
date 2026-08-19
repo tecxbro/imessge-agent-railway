@@ -13,6 +13,14 @@ import {
   type SpectrumFailureCode,
 } from "../http/readiness.js";
 import {
+  DEFAULT_READ_RECEIPT_DELAY_MS,
+  DEFAULT_TYPING_START_DELAY_MS,
+  ReadReceiptDispatcher,
+  type ReadReceiptDispatcherPort,
+} from "./read-receipts.js";
+import { InboundPresenceDispatcher } from "./inbound-presence.js";
+import type { InboundConversationPresencePort } from "./conversation-presence.js";
+import {
   SenderIdentityError,
   normalizeIMessageSender,
   type NormalizedSenderIdentity,
@@ -56,7 +64,10 @@ export type IngestDisposition = (typeof INGEST_DISPOSITIONS)[number];
 export interface AuthorizeAndIngest {
   authorizeAndIngest(
     inbound: InboundTextForAuthorization,
-    context: { signal?: AbortSignal },
+    context: {
+      signal?: AbortSignal;
+      onHandledWithoutAgentPresence?: () => void;
+    },
   ): Promise<IngestDisposition>;
 }
 
@@ -77,8 +88,12 @@ export interface SpectrumMessageLoopOptions {
   messages: () => AsyncIterable<readonly [Space, Message]>;
   readiness: SpectrumReadiness;
   onIgnored?: (reason: IgnoredSpectrumEventReason) => void;
+  conversationPresence?: InboundConversationPresencePort;
+  readReceiptDispatcher?: ReadReceiptDispatcherPort;
+  readDelayMs?: number;
   restartPolicy?: RestartPolicy;
   signal?: AbortSignal;
+  typingStartDelayMs?: number;
   wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 }
 
@@ -135,6 +150,8 @@ function defaultWait(milliseconds: number, signal?: AbortSignal): Promise<void> 
 function isAborted(signal?: AbortSignal): boolean {
   return signal?.aborted ?? false;
 }
+
+const directHandleReadReceiptDispatcher = new ReadReceiptDispatcher();
 
 function normalizeInboundText(
   space: Space,
@@ -206,7 +223,14 @@ export async function handleSpectrumMessage(
   message: Message,
   options: Pick<
     SpectrumMessageLoopOptions,
-    "authorizeAndIngest" | "onIgnored" | "signal"
+    | "authorizeAndIngest"
+    | "conversationPresence"
+    | "onIgnored"
+    | "readDelayMs"
+    | "readReceiptDispatcher"
+    | "signal"
+    | "typingStartDelayMs"
+    | "wait"
   >,
 ): Promise<IngestDisposition | IgnoredSpectrumEventReason> {
   const normalized = normalizeInboundText(space, message);
@@ -215,17 +239,50 @@ export async function handleSpectrumMessage(
     return normalized.ignored;
   }
 
+  let handledWithoutAgentPresence = false;
   const disposition = await options.authorizeAndIngest.authorizeAndIngest(
     normalized.inbound,
-    options.signal === undefined ? {} : { signal: options.signal },
+    {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.conversationPresence === undefined
+        ? {}
+        : {
+            onHandledWithoutAgentPresence: () => {
+              handledWithoutAgentPresence = true;
+            },
+          }),
+    },
   );
 
   if (disposition !== "unauthorized") {
-    // Photon delivery does not automatically mean the agent has read the
-    // message. Acknowledge it only after authorization and successful durable
-    // handling so the sender sees Read without leaking activity to rejected
-    // senders or claiming a failed ingest was seen.
-    await message.read();
+    const presenceGeneration = handledWithoutAgentPresence
+      ? undefined
+      : options.conversationPresence?.reserve(normalized.inbound.space);
+    const dispatcher = new InboundPresenceDispatcher({
+      readDelayMs: options.readDelayMs ?? DEFAULT_READ_RECEIPT_DELAY_MS,
+      readReceiptDispatcher:
+        options.readReceiptDispatcher ?? directHandleReadReceiptDispatcher,
+      typingStartDelayMs:
+        options.typingStartDelayMs ?? DEFAULT_TYPING_START_DELAY_MS,
+      wait: options.wait ?? defaultWait,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+    const scheduled = dispatcher.dispatch({
+      read: () => message.read(),
+      beginTyping: async () => {
+        if (presenceGeneration !== undefined) {
+          await options.conversationPresence?.beginRoute(
+            normalized.inbound.space,
+            presenceGeneration,
+          );
+        }
+      },
+    });
+    if (!scheduled && presenceGeneration !== undefined) {
+      void options.conversationPresence
+        ?.endRoute(normalized.inbound.space, presenceGeneration)
+        .catch(() => undefined);
+    }
   }
 
   return disposition;
@@ -236,58 +293,87 @@ export async function runSpectrumMessageLoop(
 ): Promise<void> {
   const policy = options.restartPolicy ?? DEFAULT_RESTART_POLICY;
   const wait = options.wait ?? defaultWait;
+  const readReceiptDispatcher =
+    options.readReceiptDispatcher ?? new ReadReceiptDispatcher();
   let restartAttempt = 0;
 
-  options.readiness.markStarting();
+  try {
+    options.readiness.markStarting();
 
-  while (!isAborted(options.signal)) {
-    try {
-      const messages = options.messages();
-      options.readiness.markConnected();
+    while (!isAborted(options.signal)) {
+      try {
+        const messages = options.messages();
+        options.readiness.markConnected();
 
-      for await (const [space, message] of messages) {
+        for await (const [space, message] of messages) {
+          if (isAborted(options.signal)) {
+            break;
+          }
+
+          await handleSpectrumMessage(space, message, {
+            authorizeAndIngest: options.authorizeAndIngest,
+            ...(options.conversationPresence === undefined
+              ? {}
+              : { conversationPresence: options.conversationPresence }),
+            ...(options.onIgnored === undefined
+              ? {}
+              : { onIgnored: options.onIgnored }),
+            readDelayMs: options.readDelayMs ?? DEFAULT_READ_RECEIPT_DELAY_MS,
+            readReceiptDispatcher,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+            typingStartDelayMs:
+              options.typingStartDelayMs ?? DEFAULT_TYPING_START_DELAY_MS,
+            wait,
+          });
+          // Receiving and handling an event proves that the restarted stream
+          // is healthy; future disconnects begin a new consecutive-failure
+          // window. Receipt failures never enter this control flow.
+          restartAttempt = 0;
+        }
+
         if (isAborted(options.signal)) {
           break;
         }
 
-        await handleSpectrumMessage(space, message, options);
-        // Receiving and handling an event proves that the restarted stream is
-        // healthy; future disconnects begin a new consecutive-failure window.
-        restartAttempt = 0;
-      }
+        throw new SpectrumStreamEndedError();
+      } catch (error) {
+        if (isAborted(options.signal)) {
+          break;
+        }
 
-      if (isAborted(options.signal)) {
-        break;
-      }
+        // A disconnected provider cannot retain trustworthy presence state.
+        // Cleanup stays detached from stream supervision and retry health.
+        void options.conversationPresence?.reset().catch(() => undefined);
 
-      throw new SpectrumStreamEndedError();
-    } catch (error) {
-      if (isAborted(options.signal)) {
-        break;
-      }
-
-      restartAttempt += 1;
-      const exhausted = restartAttempt > policy.maxRestarts;
-      options.readiness.markDegraded(
-        exhausted
-          ? "SPECTRUM_STREAM_RESTART_EXHAUSTED"
-          : "SPECTRUM_STREAM_DISCONNECTED",
-        restartAttempt,
-      );
-
-      if (exhausted) {
-        throw new SpectrumMessageLoopError(
-          "SPECTRUM_STREAM_RESTART_EXHAUSTED",
-          error,
+        restartAttempt += 1;
+        const exhausted = restartAttempt > policy.maxRestarts;
+        options.readiness.markDegraded(
+          exhausted
+            ? "SPECTRUM_STREAM_RESTART_EXHAUSTED"
+            : "SPECTRUM_STREAM_DISCONNECTED",
+          restartAttempt,
         );
-      }
 
-      await wait(calculateRestartDelay(restartAttempt, policy), options.signal);
-      if (!isAborted(options.signal)) {
-        options.readiness.markStarting(restartAttempt);
+        if (exhausted) {
+          throw new SpectrumMessageLoopError(
+            "SPECTRUM_STREAM_RESTART_EXHAUSTED",
+            error,
+          );
+        }
+
+        await wait(
+          calculateRestartDelay(restartAttempt, policy),
+          options.signal,
+        );
+        if (!isAborted(options.signal)) {
+          options.readiness.markStarting(restartAttempt);
+        }
       }
     }
-  }
 
-  options.readiness.markStopped();
+    options.readiness.markStopped();
+  } finally {
+    await options.conversationPresence?.close().catch(() => undefined);
+    await readReceiptDispatcher.close().catch(() => undefined);
+  }
 }

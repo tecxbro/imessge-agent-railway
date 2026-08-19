@@ -367,11 +367,11 @@ function validateExecutionResult(
     });
   }
 
-  if (result.status === "needs_approval" && result.proposedActions.length === 0) {
+  if (result.status === "needs_approval" && result.proposedActions.length !== 1) {
     context.addIssue({
       code: "custom",
       path: ["proposedActions"],
-      message: "needs_approval results require at least one proposed action",
+      message: "needs_approval results require exactly one proposed action",
     });
   }
 
@@ -396,7 +396,7 @@ const executionResultShape = {
 export const executionResultSchema = z
   .object({
     ...executionResultShape,
-    proposedActions: z.array(proposedActionSchema).max(10),
+    proposedActions: z.array(proposedActionSchema).max(1),
   })
   .strict()
   .superRefine(validateExecutionResult);
@@ -409,7 +409,7 @@ export const executionResultSchema = z
 export const codexExecutionResultSchema = z
   .object({
     ...executionResultShape,
-    proposedActions: z.array(codexProposedActionSchema).max(10),
+    proposedActions: z.array(codexProposedActionSchema).max(1),
   })
   .strict()
   .superRefine(validateExecutionResult);

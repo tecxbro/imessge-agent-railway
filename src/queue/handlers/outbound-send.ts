@@ -31,6 +31,7 @@ export interface OutboundSendDependencies {
   failureRetentionDays: number;
   now?: () => Date;
   afterAcknowledgement?: (part: OutboundPartToSend) => Promise<void> | void;
+  afterBatchComplete?: (outboundBatchId: string) => Promise<void> | void;
 }
 
 function retentionExpiry(now: Date, days: number): Date {
@@ -50,6 +51,7 @@ export function createOutboundSendHandler(dependencies: OutboundSendDependencies
           payload.outboundBatchId,
         );
         if (part === null) {
+          await dependencies.afterBatchComplete?.(payload.outboundBatchId);
           return;
         }
 
@@ -61,12 +63,16 @@ export function createOutboundSendHandler(dependencies: OutboundSendDependencies
           signal,
         });
         await dependencies.afterAcknowledgement?.(part);
-        await dependencies.outbound.checkpointSentPart(
+        const checkpoint = await dependencies.outbound.checkpointSentPart(
           part.batchId,
           part.position,
           receipt.externalMessageId,
           dependencies.now?.() ?? new Date(),
         );
+        if (checkpoint.batchComplete) {
+          await dependencies.afterBatchComplete?.(payload.outboundBatchId);
+          return;
+        }
       }
 
       throw new Error(

@@ -20,16 +20,18 @@ import {
 import { CodexClient } from "../agent/codex-client.js";
 import { buildCodexChildEnvironment } from "../agent/child-environment.js";
 import { ExecutionRuntime } from "../agent/execution-runtime.js";
+import {
+  ExecutionCapabilityError,
+  ExecutionCapabilityService,
+} from "../agent/execution-capability-service.js";
 import { InteractionRuntime } from "../agent/interaction-runtime.js";
 import {
-  modelSupportsSelection,
-  type ModelSelection,
-} from "../agent/model-selection.js";
+  ApiKeyModelCapabilitySource,
+  ChatGptModelCapabilitySource,
+} from "../agent/model-capability-source.js";
+import { ModelSettingsService } from "../agent/model-settings-service.js";
 import { ThreadStore } from "../agent/thread-store.js";
-import {
-  createCodexPairRunner,
-  probeCodexCapabilities,
-} from "../config/capabilities.js";
+import { createCodexPairRunner } from "../config/capabilities.js";
 import {
   loadEnvironment,
   type Environment,
@@ -38,13 +40,18 @@ import { loadPromptBundle } from "../config/prompt-bundle.js";
 import { createDatabaseClient, type DatabaseClient } from "../db/client.js";
 import { runDatabaseMigrations } from "../db/migrate.js";
 import { ChainRepository } from "../db/repositories/chains.js";
+import { ChainAuthorizationRepository } from "../db/repositories/chain-authorization.js";
 import { CommandRepository } from "../db/repositories/commands.js";
 import { PostgresCodexThreadRepository } from "../db/repositories/codex-threads.js";
 import { FailureRepository } from "../db/repositories/failures.js";
+import { PostgresExecutionCapabilityRepository } from "../db/repositories/execution-capabilities.js";
+import { ApprovalRepository } from "../db/repositories/approvals.js";
+import { ActionExecutionRepository } from "../db/repositories/action-executions.js";
+import { MemoryCurationRepository } from "../db/repositories/memory-curation.js";
+import { PostgresPhotonInstallationRepository } from "../db/repositories/photon-installations.js";
 import { InboundRepository } from "../db/repositories/inbound.js";
 import { PostgresMemoryReceiptStore } from "../db/repositories/memory-receipts.js";
 import {
-  ModelPreferenceUnavailableError,
   ModelSettingsRepository,
 } from "../db/repositories/model-settings.js";
 import { OperationalRepository } from "../db/repositories/operational.js";
@@ -52,10 +59,9 @@ import { OrchestrationRepository } from "../db/repositories/orchestration.js";
 import { OutboundRepository } from "../db/repositories/outbound.js";
 import { RetentionRepository } from "../db/repositories/retention.js";
 import type { AgentServiceBootstrap } from "../index.js";
-import {
-  ModelSettingsApiError,
-  type ModelSettingsController,
-} from "../http/server.js";
+import type { ModelSettingsController } from "../http/server.js";
+import { ModelSettingsHttpController } from "../http/model-settings-controller.js";
+import { SpectrumReadiness } from "../http/readiness.js";
 import { recallMemoryContext } from "../memory/recall.js";
 import {
   SupermemoryClient,
@@ -65,6 +71,9 @@ import { createLogger } from "../observability/logger.js";
 import { DurableQueue } from "../queue/boss.js";
 import { createInboundFlushHandler } from "../queue/handlers/inbound-flush.js";
 import { createOutboundSendHandler } from "../queue/handlers/outbound-send.js";
+import { createApprovalRequestHandler } from "../queue/handlers/approval-request.js";
+import { createApprovalExecuteHandler } from "../queue/handlers/approval-execute.js";
+import { createMemoryCurateHandler } from "../queue/handlers/memory-curate.js";
 import { createRetentionHandler } from "../queue/handlers/retention.js";
 import { createTaskExecuteHandler } from "../queue/handlers/task-execute.js";
 import { createTurnPlanHandler } from "../queue/handlers/turn-plan.js";
@@ -73,24 +82,46 @@ import { InFlightChainRegistry } from "../queue/in-flight-chain-registry.js";
 import { QUEUE_NAMES } from "../queue/names.js";
 import { DurablePipeline } from "../queue/pipeline.js";
 import { PgBossPublisher } from "../queue/publisher.js";
+import { PgBossMemoryQueuePublisher } from "../queue/extensions/memory-queues.js";
 import {
   DatabaseAuthorizationDirectory,
   DatabaseGroupReplyVerifier,
   DeterministicSenderAuthorizer,
   SecureAuthorizeAndIngest,
 } from "../security/authorize-sender.js";
+import {
+  ApprovalService,
+  createApprovalPayloadCipher,
+  type ApprovalChainProgression,
+} from "../security/approvals.js";
+import {
+  CodexStartDeniedError,
+  QueuedCodexStartGate,
+} from "../security/queued-authorization.js";
+import { SecureStructuredCodexRunner } from "../security/secure-codex-runner.js";
 import { createDataCipher } from "../security/data-cipher.js";
 import { OperationalRateLimits } from "../security/rate-limits.js";
+import {
+  AuthorizedCommandHandler,
+  AuthorizedInboundCommandInterceptor,
+} from "../commands/handlers.js";
+import { ActionExecutorRegistry } from "../actions/action-executor-registry.js";
 import { auditStartupSecretBoundaries } from "../security/secret-boundaries.js";
 import { runSpectrumMessageLoop } from "../transport/message-loop.js";
 import {
-  PhotonSetupService,
+  PhotonInstallationHttpProvider,
   type PhotonSetupController,
 } from "../transport/photon-setup.js";
+import { PhotonInstallationService } from "../transport/photon-installation-service.js";
+import { DurablePhotonSetupController } from "../transport/durable-photon-setup.js";
 import {
   DurableInboundConsumer,
   NativeSpectrumOutboundTransport,
 } from "../transport/operational.js";
+import {
+  ConversationPresenceCoordinator,
+  DEFAULT_TYPING_RUNTIME_BUFFER_MS,
+} from "../transport/conversation-presence.js";
 import { createSpectrumSpaceResolver } from "../transport/space-resolver.js";
 import {
   createSpectrumApp,
@@ -100,6 +131,9 @@ import {
   type SpectrumApp,
 } from "../transport/spectrum.js";
 import { PhotonCredentialsStore } from "./photon-credentials.js";
+import { createOwnerBindingRevisionPort } from "./owner-binding-revision.js";
+import { RestartableOutboundTransport } from "./restartable-outbound-transport.js";
+import type { SpectrumRunHandle } from "./spectrum-run-handle.js";
 import { preparePersistentStorage } from "./persistent-storage.js";
 import {
   createDeploymentIdentityController,
@@ -119,6 +153,14 @@ interface QueueComposition {
   retention: RetentionRepository;
   publisher: PgBossPublisher;
   memoryReceipts: PostgresMemoryReceiptStore;
+  authorizationReferences: ChainAuthorizationRepository;
+  memoryCuration: MemoryCurationRepository;
+  memoryPublisher: PgBossMemoryQueuePublisher;
+  approvals: ApprovalRepository;
+  actionExecutions: ActionExecutionRepository;
+  authorizationDirectory: DatabaseAuthorizationDirectory;
+  rateLimits: OperationalRateLimits;
+  approvalCommands: AuthorizedCommandHandler;
 }
 
 export interface ProductionRuntime {
@@ -151,16 +193,8 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
   const legacySpectrumCredentials =
     spectrumCredentialsFromEnvironment(environment);
   const deploymentIdentity = createDeploymentIdentityController();
-  const photonSetup = new PhotonSetupService({
-    ownerIdentity: deploymentIdentity,
-    credentialsStore: photonCredentialsStore,
-    ...(storedPhotonSetup === undefined
-      ? {}
-      : { storedCredentials: storedPhotonSetup }),
-    legacyCredentialsPresent: legacySpectrumCredentials !== undefined,
-  });
-  let spectrumCredentials: SpectrumCloudCredentials | undefined =
-    resolveSpectrumCloudCredentials(storedPhotonSetup, environment);
+  const photonSetup = new DurablePhotonSetupController();
+  let spectrumCredentials: SpectrumCloudCredentials | undefined;
   const protectedValues: string[] = [
     environment.DATABASE_URL,
     environment.APP_ENCRYPTION_KEY,
@@ -198,7 +232,12 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
     }
   };
   const inFlightChains = new InFlightChainRegistry();
+  let activeConversationPresence: ConversationPresenceCoordinator | undefined;
+  const endChainPresence = (chainId: string): void => {
+    void activeConversationPresence?.endChain(chainId);
+  };
   const interruptSupersededChains = (chainIds: readonly string[]): void => {
+    void activeConversationPresence?.endChains(chainIds);
     const abortedWorkCount = inFlightChains.cancel(chainIds);
     if (abortedWorkCount > 0) {
       logger.info(
@@ -209,6 +248,18 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         },
         "superseded in-flight work aborted",
       );
+    }
+  };
+  const runChainWithPresence = async (
+    chainId: string,
+    signal: AbortSignal,
+    operation: (chainSignal: AbortSignal) => Promise<void>,
+  ): Promise<void> => {
+    try {
+      await inFlightChains.run(chainId, signal, operation);
+    } catch (error) {
+      endChainPresence(chainId);
+      throw error;
     }
   };
   const promptBundle = await loadPromptBundle();
@@ -254,87 +305,50 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
   let databaseClient: DatabaseClient | undefined;
   let operationalRepository: OperationalRepository | undefined;
   let modelSettingsRepository: ModelSettingsRepository | undefined;
+  let modelSettingsService: ModelSettingsService | undefined;
+  let photonInstallationService: PhotonInstallationService | undefined;
   let queue: DurableQueue | undefined;
   let composition: QueueComposition | undefined;
-  let spectrumApp: SpectrumApp | undefined;
-  let spectrumLoop: Promise<void> | undefined;
+  const outboundTransport = new RestartableOutboundTransport();
+  const activeSpectrumRuns = new Map<
+    string,
+    { controller: AbortController; done: Promise<{ reason: "exited" | "restart_exhausted" }> }
+  >();
+  let nextSpectrumRun = 0;
   let memoryProvider: SupermemoryPort | undefined;
-
-  const syncCapabilitiesToRepository = async (
-    snapshot: ReturnType<NonNullable<typeof chatgptSetup>["capabilities"]>,
-  ): Promise<void> => {
-    const repository = modelSettingsRepository;
-    if (repository === undefined || snapshot.state === "refreshing") {
-      return;
-    }
-    await repository.syncAccountCapabilities({
-      planType: snapshot.state === "available" ? snapshot.planType : null,
-      models: snapshot.state === "available" ? snapshot.models : [],
-      refreshedAt: snapshot.refreshedAt ?? new Date(),
-    });
-  };
-  chatgptSetup?.onCapabilitiesChanged(syncCapabilitiesToRepository);
-
-  const modelSettings: ModelSettingsController = {
-    async read() {
-      const repository = modelSettingsRepository;
-      const capabilities = chatgptSetup?.capabilities();
-      if (
-        repository === undefined ||
-        capabilities === undefined ||
-        capabilities.state !== "available"
-      ) {
-        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
-      }
-      const settings = await repository.read();
-      if (
-        settings.effective === null ||
-        settings.selectionState === "pending" ||
-        settings.selectionState === "unavailable"
-      ) {
-        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
-      }
-      return { ...settings, availableModels: capabilities.models };
-    },
-    async update(selection: ModelSelection) {
-      const repository = modelSettingsRepository;
-      if (repository === undefined || chatgptSetup === undefined) {
-        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
-      }
-      const capabilities = await chatgptSetup.refreshCapabilities();
-      if (capabilities.state !== "available") {
-        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
-      }
-      const model = capabilities.models.find(
-        (candidate) => candidate.id === selection.modelId,
-      );
-      if (model === undefined || !modelSupportsSelection(model, selection)) {
-        throw new ModelSettingsApiError("MODEL_SELECTION_STALE");
-      }
-      const probe = await pairRunner.probe({
-        model: selection.modelId,
-        effort: selection.reasoningEffort,
-      });
-      if (!probe.supported) {
-        throw new ModelSettingsApiError("MODEL_PAIR_UNAVAILABLE");
-      }
-      try {
-        const settings = await repository.updatePreference({
-          ...selection,
-          currentCatalog: capabilities.models,
-        });
-        return { ...settings, availableModels: capabilities.models };
-      } catch (error) {
-        if (error instanceof ModelPreferenceUnavailableError) {
-          throw new ModelSettingsApiError("MODEL_SELECTION_STALE");
-        }
-        throw new ModelSettingsApiError("MODEL_SETTINGS_UNAVAILABLE");
-      }
-    },
-  };
+  const codexActivationListeners = new Set<
+    (snapshot: {
+      auth: "ready" | "missing" | "failed";
+      capabilities: "available" | "unavailable";
+    }) => void | Promise<void>
+  >();
+  const photonActivationListeners = new Set<
+    (snapshot: {
+      connected: boolean;
+      ownerRevisionCurrent: boolean;
+    }) => void | Promise<void>
+  >();
+  const modelSettings: ModelSettingsController = new ModelSettingsHttpController({
+    readDashboard: async () =>
+      await required(modelSettingsService, "Model settings read").readDashboard(),
+    updatePreference: async (selection) =>
+      await required(modelSettingsService, "Model settings update").updatePreference(
+        selection,
+      ),
+  });
 
   // Configuration and storage startup
   const bootstrap: AgentServiceBootstrap = {
+    onCodexActivationChanged(listener) {
+      codexActivationListeners.add(listener);
+      return () => codexActivationListeners.delete(listener);
+    },
+
+    onPhotonActivationChanged(listener) {
+      photonActivationListeners.add(listener);
+      return () => photonActivationListeners.delete(listener);
+    },
+
     async prepareConfiguration() {
       // Parsing the environment and prompt contract above is the configuration
       // stage. Construct the child allowlist here so unsafe inheritance fails
@@ -414,13 +428,62 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         client.database,
         environment.DEPLOYMENT_ID,
       );
-      const capabilities = chatgptSetup?.capabilities();
-      if (
-        capabilities !== undefined &&
-        capabilities.state === "available"
-      ) {
-        await syncCapabilitiesToRepository(capabilities);
-      }
+      const modelSource =
+        environment.CODEX_AUTH_MODE === "chatgpt"
+          ? new ChatGptModelCapabilitySource(chatgptSetup!)
+          : new ApiKeyModelCapabilitySource({
+              selection: (await modelSettingsRepository.read()).preferred,
+          });
+      modelSettingsService = new ModelSettingsService({
+        source: modelSource,
+        store: modelSettingsRepository,
+        probe: pairRunner,
+        readiness: {
+          publish(snapshot) {
+            const activationSnapshot = {
+              auth:
+                environment.CODEX_AUTH_MODE === "api_key" ||
+                chatgptSetup?.status().state === "connected"
+                  ? ("ready" as const)
+                  : chatgptSetup?.status().state === "failed"
+                    ? ("failed" as const)
+                    : ("missing" as const),
+              capabilities: snapshot.ready
+                ? ("available" as const)
+                : ("unavailable" as const),
+            };
+            for (const listener of codexActivationListeners) {
+              void Promise.resolve(listener(activationSnapshot)).catch(
+                () => undefined,
+              );
+            }
+          },
+        },
+      });
+      await modelSettingsService.start();
+
+      const photonRepository = new PostgresPhotonInstallationRepository(
+        client.pool,
+      );
+      const ownerBinding = createOwnerBindingRevisionPort({
+        deploymentId: environment.DEPLOYMENT_ID,
+        ownerIdentity: deploymentIdentity,
+        revisionStore: photonRepository,
+      });
+      photonInstallationService = new PhotonInstallationService({
+        installationId: environment.DEPLOYMENT_ID,
+        deploymentId: environment.DEPLOYMENT_ID,
+        repository: photonRepository,
+        ownerBinding,
+        provider: new PhotonInstallationHttpProvider(),
+        cipher,
+      });
+      photonSetup.bind({
+        service: photonInstallationService,
+        repository: photonRepository,
+        ownerBinding,
+        cipher,
+      });
       const legacyOwner = selectLegacyOwnerPhoneNumber({
         ...(environment.OWNER_PHONE_NUMBER === undefined
           ? {}
@@ -440,6 +503,21 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         legacyOwner,
         protectPhoneNumber: protectValue,
       });
+      const existingInstallation = await photonRepository.load(
+        environment.DEPLOYMENT_ID,
+      );
+      if (existingInstallation !== undefined) {
+        void photonSetup.resume().catch(() => undefined);
+      } else if (storedPhotonSetup !== undefined) {
+        void photonSetup
+          .importLegacyCredentials(storedPhotonSetup)
+          .catch(() => undefined);
+      } else if (legacySpectrumCredentials !== undefined) {
+        logger.warn(
+          { component: "photon", errorCode: "PHOTON_LEGACY_IMPORT_INCOMPLETE" },
+          "legacy Spectrum-only credentials cannot bypass the durable current-owner installation contract",
+        );
+      }
       return {
         status: initialization.status,
         migrationRequired: initialization.migrationRequired,
@@ -465,20 +543,220 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
       await queue.start();
       const publisher = new PgBossPublisher(queue.boss);
       const inbound = new InboundRepository(client.database);
-      const chains = new ChainRepository(client.database);
+      const authorizationReferences = new ChainAuthorizationRepository(
+        client.database,
+      );
+      const chains = new ChainRepository(
+        client.database,
+        authorizationReferences,
+      );
       const outbound = new OutboundRepository(client.database);
+      const authorizationDirectory = new DatabaseAuthorizationDirectory(
+        client.database,
+      );
+      const rateLimits = new OperationalRateLimits({
+        messagesPerOwner: {
+          limit: environment.MESSAGE_RATE_LIMIT_PER_MINUTE,
+          windowMs: 60_000,
+        },
+        tasksPerOwner: {
+          limit: environment.TASK_RATE_LIMIT_PER_HOUR,
+          windowMs: 60 * 60 * 1_000,
+        },
+      });
+      const executionCapabilityRepository =
+        new PostgresExecutionCapabilityRepository(client.database);
+      await executionCapabilityRepository.seedPersonalWorkspaceBinding(
+        environment.DEPLOYMENT_ID,
+      );
+      const executionCapabilities = new ExecutionCapabilityService({
+        repository: executionCapabilityRepository,
+        workspaceRoot: environment.AGENT_WORKSPACE_ROOT,
+        codexHome: environment.CODEX_HOME,
+      });
+      const actorFor = async (reference: {
+        deploymentId: string;
+        ownerId: string;
+        principalIdentityId: string;
+      }) => {
+        const principal = await authorizationDirectory.findById(
+          reference.deploymentId,
+          reference.principalIdentityId,
+        );
+        if (principal === undefined || principal.ownerId !== reference.ownerId) {
+          throw new CodexStartDeniedError(
+            "CODEX_START_AUTHORIZATION_INVALID",
+          );
+        }
+        if (principal.revokedAt !== null) {
+          throw new CodexStartDeniedError("CODEX_START_IDENTITY_REVOKED");
+        }
+        if (principal.ownerStatus !== "active") {
+          throw new CodexStartDeniedError("CODEX_START_OWNER_DISABLED");
+        }
+        if (principal.deploymentStatus !== "active") {
+          throw new CodexStartDeniedError(
+            "CODEX_START_DEPLOYMENT_UNAVAILABLE",
+          );
+        }
+        return {
+          deploymentId: reference.deploymentId,
+          ownerId: reference.ownerId,
+          senderRole: principal.role,
+        };
+      };
+      const memoryCuration = new MemoryCurationRepository(client.database, {
+        encrypt: cipher.encrypt,
+        decrypt: cipher.decrypt,
+      });
       const orchestration = new OrchestrationRepository(client.database, {
         workspaceRoot: environment.AGENT_WORKSPACE_ROOT,
         interactionWorkingDirectory: environment.AGENT_WORKSPACE_ROOT,
         encrypt: cipher.encrypt,
         decrypt: cipher.decrypt,
-        // A new Railway volume has no code-owned execution binding. The
-        // interaction model therefore answers directly until an operator adds
-        // an explicit workspace capability in a later requirement.
-        capabilities: () => [],
+        authorizationReferences,
+        memoryCuration,
+        capabilities: async (identity) => {
+          const reference =
+            identity.chainId === undefined
+              ? undefined
+              : await authorizationReferences.load(identity.chainId);
+          if (reference === undefined) return [];
+          const available = await executionCapabilities.listAvailableCapabilities(
+            await actorFor(reference),
+          );
+          return available.map((capability) => ({
+            workspaceBinding: capability.workspaceBinding,
+            permissionProfiles: capability.allowedPermissionProfiles,
+          }));
+        },
+        authorizeCapability: async (input) => {
+          try {
+            const authorized =
+              await executionCapabilities.authorizeExecutionCapability(
+                await actorFor(input.authorizationReference),
+                {
+                  workspaceBinding: input.workspaceBinding,
+                  permissionProfile: input.permissionProfile,
+                },
+              );
+            return {
+              resolvedWorkspacePath: authorized.resolvedWorkspacePath,
+              allowedPermissionProfiles: authorized.allowedPermissionProfiles,
+            };
+          } catch (error) {
+            if (error instanceof ExecutionCapabilityError) {
+              throw new CodexStartDeniedError(
+                "CODEX_START_AUTHORIZATION_INVALID",
+              );
+            }
+            throw error;
+          }
+        },
       });
       const failures = new FailureRepository(client.database, protectedValues);
       const retention = new RetentionRepository(client.database);
+      const memoryPublisher = new PgBossMemoryQueuePublisher(queue.boss);
+      const approvalCipher = createApprovalPayloadCipher(
+        environment.APP_ENCRYPTION_KEY,
+      );
+      const approvals = new ApprovalRepository(client.database, {
+        encryptExecutionResult: cipher.encrypt,
+      });
+      const approvalService = new ApprovalService(approvals, approvalCipher);
+      const actionExecutions = new ActionExecutionRepository(client.database, {
+        encryptExecutionResult: cipher.encrypt,
+      });
+      const executors = new ActionExecutorRegistry();
+      const publishApprovalProgression = async (
+        progression: ApprovalChainProgression | null,
+      ): Promise<void> => {
+        if (progression === null) return;
+        await Promise.all(
+          progression.newlyRunnableTasks.map((task) =>
+            publisher.enqueueTaskExecute(task),
+          ),
+        );
+        if (progression.shouldSynthesize) {
+          await publisher.enqueueTurnSynthesize({
+            chainId: progression.chainId,
+            expectedChainVersion: progression.expectedChainVersion,
+            expectedState: "executing",
+          });
+        }
+      };
+      const expireApprovals = async (): Promise<void> => {
+        for (const scope of await approvals.findExpiredApprovalScopes()) {
+          const outcome = await approvalService.expireWithProgression(
+            scope.ownerId,
+            scope.spaceId,
+          );
+          for (const progression of outcome.progressions) {
+            await publishApprovalProgression(progression);
+          }
+        }
+      };
+      const reconcileApprovalJobs = async (
+        includeRequestJobs: boolean,
+      ): Promise<void> => {
+        await expireApprovals();
+        if (includeRequestJobs) {
+          for (const taskId of await approvals.findApprovalRequestTaskIds()) {
+            await publisher.enqueueApprovalRequest({ executionTaskId: taskId });
+          }
+        }
+        for (const recovery of await approvals.findApprovedActionRecoveries()) {
+          const consumed = await approvalService.consume(
+            recovery.approvalId,
+            recovery.ownerId,
+            recovery.spaceId,
+            recovery.executionTaskId,
+          );
+          if (consumed !== undefined) {
+            await publisher.enqueueApprovalExecute({
+              actionExecutionId: consumed.actionExecutionId,
+            });
+          }
+        }
+        const staleActions = await actionExecutions.requeueStaleRunning(
+          new Date(Date.now() - environment.MAX_TASK_RUNTIME_MS),
+        );
+        const actionIds = new Set([
+          ...(await actionExecutions.findPendingActionExecutionIds()),
+          ...staleActions,
+        ]);
+        for (const actionExecutionId of actionIds) {
+          await publisher.enqueueApprovalExecute({ actionExecutionId });
+        }
+      };
+      const approvalCommands = new AuthorizedCommandHandler({
+        approvals: {
+          listPending: (actor, spaceId) =>
+            approvalService.listPending(actor, spaceId),
+          respond: async (actor, spaceId, approvalId, status) => {
+            const outcome = await approvalService.respondWithProgression(
+              actor,
+              spaceId,
+              approvalId,
+              status,
+            );
+            await publishApprovalProgression(outcome.progression);
+            if (outcome.changed && status === "approved") {
+              const consumed = await approvalService.consume(
+                approvalId,
+                actor.ownerId,
+                spaceId,
+              );
+              if (consumed !== undefined) {
+                await publisher.enqueueApprovalExecute({
+                  actionExecutionId: consumed.actionExecutionId,
+                });
+              }
+            }
+            return outcome.changed;
+          },
+        },
+      });
       const pipeline = new DurablePipeline({
         inbound,
         chains,
@@ -500,89 +778,34 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         retention,
         publisher,
         memoryReceipts: new PostgresMemoryReceiptStore(client.database),
+        authorizationReferences,
+        memoryCuration,
+        memoryPublisher,
+        approvals,
+        actionExecutions,
+        authorizationDirectory,
+        rateLimits,
+        approvalCommands,
       };
-    },
 
-    // Codex capability check
-    async checkCodex() {
-      const repository = required(
-        modelSettingsRepository,
-        "Codex model settings check",
+      const state = composition;
+      const startGate = new QueuedCodexStartGate(
+        authorizationDirectory,
+        rateLimits,
       );
-      let selection: ModelSelection | null;
-      if (environment.CODEX_AUTH_MODE === "chatgpt") {
-        const capabilities = await chatgptSetup!.refreshCapabilities();
-        await syncCapabilitiesToRepository(capabilities);
-        selection = (await repository.read()).effective;
-      } else {
-        selection = (await repository.read()).preferred;
-      }
-      const report = await probeCodexCapabilities({
-        codexHome: environment.CODEX_HOME,
-        authMode: environment.CODEX_AUTH_MODE,
-        ...(environment.OPENAI_API_KEY === undefined
-          ? {}
-          : { openAiApiKey: environment.OPENAI_API_KEY }),
-        selection,
-        runner: pairRunner,
-      });
-      if (
-        environment.CODEX_AUTH_MODE === "api_key" &&
-        report.ready &&
-        selection !== null
-      ) {
-        await repository.activateProbedPreference(selection);
-      }
-      const auth = report.components.auth;
-      return {
-        auth:
-          auth === "ok" ? "ok" : auth === "missing" ? "missing" : "failed",
-        capabilities:
-          auth !== "ok" ? "unknown" : report.ready ? "ok" : "failed",
-        ...(auth === "missing"
-          ? { authCode: "CODEX_AUTH_MISSING" as const }
-          : auth === "failed"
-            ? { authCode: "CODEX_AUTH_EXPIRED" as const }
-            : {}),
-        ...(auth === "ok" && !report.ready
-          ? { capabilityCode: "CODEX_CAPABILITY_FAILED" as const }
-          : {}),
-      };
-    },
-
-    // Optional memory setup
-    async configureSupermemory() {
-      if (environment.SUPERMEMORY_API_KEY === undefined) {
-        memoryProvider = undefined;
-        return "disabled";
-      }
-      memoryProvider = new SupermemoryClient({
-        apiKey: environment.SUPERMEMORY_API_KEY,
-      });
-      return "ok";
-    },
-
-    // Spectrum and worker composition
-    async startSpectrum({ signal, readiness }) {
-      const credentials = required(
-        spectrumCredentials,
-        "Spectrum credential setup",
-      );
-      const state = required(composition, "Spectrum startup");
-      const durableQueue = required(queue, "Spectrum worker startup");
-      const client = required(databaseClient, "Spectrum startup");
-      spectrumApp = await createSpectrumApp(credentials);
-      const resolver = createSpectrumSpaceResolver(spectrumApp);
-      const outboundTransport = new NativeSpectrumOutboundTransport({
-        operational: state.operational,
-        resolver: resolver as unknown as import("../transport/space-resolver.js").SpaceResolver<Space>,
-      });
       const threadStore = new ThreadStore(
         new PostgresCodexThreadRepository(client.database, {
           encrypt: cipher.encrypt,
           decrypt: cipher.decrypt,
         }),
         codex,
+        (chainId) =>
+          new SecureStructuredCodexRunner({
+            chainId,
+            authorizationReferences,
+            startGate,
+            delegate: codex,
+          }),
       );
       const interaction = new InteractionRuntime(threadStore);
       const execution = new ExecutionRuntime(threadStore);
@@ -599,30 +822,33 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         }),
       });
 
-      const combinedWorkerSignal = (jobSignal: AbortSignal): AbortSignal =>
-        AbortSignal.any([signal, jobSignal]);
-      await durableQueue.registerWorker(
+      await queue.registerWorker(
         QUEUE_NAMES.inboundFlush,
         createInboundFlushHandler({
-          chains: state.chains,
-          publisher: state.publisher,
+          chains,
+          publisher,
           onChainsSuperseded: interruptSupersededChains,
+          onChainCreated: (chainId, spaceId) => {
+            activeConversationPresence?.bindChain(chainId, spaceId);
+          },
         }),
       );
       const turnPlanHandler = createTurnPlanHandler({
-        repository: state.orchestration,
+        repository: orchestration,
         interaction,
-        publisher: state.publisher,
+        publisher,
+        memoryPublisher: publisher,
+        reconcileMemory: async () => {
+          await memoryPublisher.reconcile(memoryCuration, {
+            providerEnabled: memoryProvider !== undefined,
+          });
+        },
         commandHandlers: commands,
         promptBundle,
         encrypt: cipher.encrypt,
-        recallMemory: async (context, recallSignal) => {
+        recallMemory: async (context, signal) => {
           if (memoryProvider === undefined) {
-            return {
-              available: false,
-              ownerProfile: [],
-              recalledMemories: [],
-            };
+            return { available: false, ownerProfile: [], recalledMemories: [] };
           }
           const recalled = await recallMemoryContext({
             provider: memoryProvider,
@@ -631,28 +857,16 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
             ownerId: context.ownerId,
             spaceId: context.spaceId,
             query: context.combinedTurnText,
-            signal: recallSignal,
+            signal,
           });
           return {
             available: recalled.available,
             ownerProfile: recalled.ownerProfile.map((item) => item.text),
-            recalledMemories: recalled.relevantMemories.map(
-              (item) => item.text,
-            ),
+            recalledMemories: recalled.relevantMemories.map((item) => item.text),
           };
         },
-        sendStatus: async ({
-          spaceId,
-          message,
-          clientGuid,
-          signal: statusSignal,
-        }) => {
-          await outboundTransport.send({
-            spaceId,
-            clientGuid,
-            text: message,
-            signal: statusSignal,
-          });
+        sendStatus: async ({ spaceId, message, clientGuid, signal }) => {
+          await outboundTransport.send({ spaceId, clientGuid, text: message, signal });
         },
         onStatusFailure: () => {
           logger.warn(
@@ -660,116 +874,240 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
             "optional progress status could not be delivered",
           );
         },
+        onPresenceEnd: endChainPresence,
       });
-      await durableQueue.registerWorker(
+      await queue.registerWorker(
         QUEUE_NAMES.turnPlan,
-        async (payload, jobSignal) =>
-          await inFlightChains.run(
-            payload.chainId,
-            combinedWorkerSignal(jobSignal),
-            async (chainSignal) =>
-              await turnPlanHandler(payload, chainSignal),
+        async (payload, signal) =>
+          runChainWithPresence(payload.chainId, signal, (chainSignal) =>
+            turnPlanHandler(payload, chainSignal),
           ),
       );
       const taskExecuteHandler = createTaskExecuteHandler({
-        repository: state.orchestration,
+        repository: orchestration,
         execution,
-        publisher: state.publisher,
+        publisher,
+        approvalPublisher: publisher,
         promptBundle,
         maximumRuntimeMs: environment.MAX_TASK_RUNTIME_MS,
+        onPresenceEnd: endChainPresence,
       });
-      await durableQueue.registerWorker(
+      await queue.registerWorker(
         QUEUE_NAMES.taskExecute,
-        async (payload, jobSignal) =>
-          await inFlightChains.run(
-            payload.chainId,
-            combinedWorkerSignal(jobSignal),
-            async (chainSignal) =>
-              await taskExecuteHandler(payload, chainSignal),
+        async (payload, signal) =>
+          runChainWithPresence(payload.chainId, signal, (chainSignal) =>
+            taskExecuteHandler(payload, chainSignal),
           ),
         environment.MAX_EXECUTION_CONCURRENCY,
       );
-      const turnSynthesizeHandler = createTurnSynthesizeHandler({
-        repository: state.orchestration,
+      const synthesizeHandler = createTurnSynthesizeHandler({
+        repository: orchestration,
         interaction,
-        publisher: state.publisher,
+        publisher,
         promptBundle,
         encrypt: cipher.encrypt,
+        onPresenceEnd: endChainPresence,
       });
-      await durableQueue.registerWorker(
+      await queue.registerWorker(
         QUEUE_NAMES.turnSynthesize,
-        async (payload, jobSignal) =>
-          await inFlightChains.run(
-            payload.chainId,
-            combinedWorkerSignal(jobSignal),
-            async (chainSignal) =>
-              await turnSynthesizeHandler(payload, chainSignal),
+        async (payload, signal) =>
+          runChainWithPresence(payload.chainId, signal, (chainSignal) =>
+            synthesizeHandler(payload, chainSignal),
           ),
       );
-      const outboundSendHandler = createOutboundSendHandler({
-        outbound: state.outbound,
-        failures: state.failures,
+      const outboundHandler = createOutboundSendHandler({
+        outbound,
+        failures,
         transport: outboundTransport,
         decrypt: cipher.decrypt,
         failureRetentionDays: environment.FAILURE_RETENTION_DAYS,
+        afterBatchComplete: async () => {
+          await memoryPublisher.reconcile(memoryCuration, {
+            providerEnabled: memoryProvider !== undefined,
+          });
+        },
       });
-      await durableQueue.registerWorker(
+      await queue.registerWorker(
         QUEUE_NAMES.outboundSend,
-        async (payload, jobSignal) => {
-          const chainId = await state.outbound.findChainIdForBatch(
+        async (payload, signal) => {
+          const chainId = await outbound.findChainIdForBatch(
             payload.outboundBatchId,
           );
-          if (chainId === undefined) {
-            await outboundSendHandler(
-              payload,
-              combinedWorkerSignal(jobSignal),
-            );
-            return;
-          }
-          await inFlightChains.run(
-            chainId,
-            combinedWorkerSignal(jobSignal),
-            async (chainSignal) =>
-              await outboundSendHandler(payload, chainSignal),
+          if (chainId === undefined)
+            return await outboundHandler(payload, signal);
+          await runChainWithPresence(chainId, signal, (chainSignal) =>
+            outboundHandler(payload, chainSignal),
           );
         },
       );
-      await durableQueue.registerWorker(
+      await queue.registerWorker(
+        QUEUE_NAMES.approvalRequest,
+        async (payload) => {
+          await createApprovalRequestHandler({
+          repository: approvals,
+          approvals: approvalService,
+          executors,
+          decryptExecutionResult: cipher.decrypt,
+          publisher: {
+            publishApprovalRequest: async (message) => {
+              await outboundTransport.send({
+                spaceId: message.spaceId,
+                clientGuid: `approval-${message.idempotencyKey}`,
+                text: message.body,
+                signal: new AbortController().signal,
+              });
+            },
+          },
+          })(payload);
+        },
+      );
+      await queue.registerWorker(
+        QUEUE_NAMES.approvalExecute,
+        createApprovalExecuteHandler({
+          repository: actionExecutions,
+          executors,
+          cipher: approvalCipher,
+          publisher: {
+            enqueueNewlyRunnableTask: (task) => publisher.enqueueTaskExecute(task),
+            enqueueApprovalSynthesis: (input) =>
+              publisher.enqueueTurnSynthesize(input),
+          },
+        }),
+      );
+      await queue.registerWorker(
+        QUEUE_NAMES.memoryCurate,
+        async (payload, signal) =>
+          createMemoryCurateHandler({
+            repository: memoryCuration,
+            receipts: state.memoryReceipts,
+            ...(memoryProvider === undefined ? {} : { provider: memoryProvider }),
+          })(payload, signal),
+      );
+      await queue.registerWorker(
         QUEUE_NAMES.maintenanceRetention,
         createRetentionHandler({
-          retention: state.retention,
+          retention,
           rawMessageRetentionDays: environment.RAW_MESSAGE_RETENTION_DAYS,
           failureRetentionDays: environment.FAILURE_RETENTION_DAYS,
         }),
       );
+      await queue.registerWorker(
+        QUEUE_NAMES.maintenanceHealth,
+        async () => reconcileApprovalJobs(false),
+      );
 
-      // Re-publish durable work before accepting another provider event.
-      await state.pipeline.reconcile();
-      const directory = new DatabaseAuthorizationDirectory(client.database);
+      await pipeline.reconcile();
+      await memoryPublisher.reconcile(memoryCuration, {
+        providerEnabled: memoryProvider !== undefined,
+      });
+      await reconcileApprovalJobs(true);
+    },
+
+    // Codex capability check
+    async checkCodex() {
+      const service = required(modelSettingsService, "Codex model settings check");
+      let modelReady = false;
+      try {
+        modelReady = (await service.refresh()).ready;
+      } catch {
+        modelReady = false;
+      }
+      const auth =
+        environment.CODEX_AUTH_MODE === "api_key" ||
+        chatgptSetup?.status().state === "connected"
+          ? "ok"
+          : chatgptSetup?.status().state === "failed"
+            ? "failed"
+            : "missing";
+      return {
+        auth:
+          auth === "ok" ? "ok" : auth === "missing" ? "missing" : "failed",
+        capabilities:
+          auth !== "ok" ? "unknown" : modelReady ? "ok" : "failed",
+        ...(auth === "missing"
+          ? { authCode: "CODEX_AUTH_MISSING" as const }
+          : auth === "failed"
+            ? { authCode: "CODEX_AUTH_EXPIRED" as const }
+            : {}),
+        ...(auth === "ok" && !modelReady
+          ? { capabilityCode: "CODEX_CAPABILITY_FAILED" as const }
+          : {}),
+      };
+    },
+
+    // Optional memory setup
+    async configureSupermemory() {
+      if (environment.SUPERMEMORY_API_KEY === undefined) {
+        memoryProvider = undefined;
+        return "disabled";
+      }
+      memoryProvider = new SupermemoryClient({
+        apiKey: environment.SUPERMEMORY_API_KEY,
+      });
+      if (composition !== undefined) {
+        await composition.memoryPublisher.reconcile(
+          composition.memoryCuration,
+          { providerEnabled: true },
+        );
+      }
+      return "ok";
+    },
+
+    // Restartable Spectrum intake; durable workers were composed once above.
+    async startSpectrumRun(): Promise<SpectrumRunHandle> {
+      const currentCredentials = photonSetup.credentials();
+      if (
+        photonSetup.status().state !== "connected" ||
+        currentCredentials === undefined
+      ) {
+        throw new Error(
+          "Spectrum cannot start until Photon is connected for the current owner revision.",
+        );
+      }
+      spectrumCredentials = {
+        projectId: currentCredentials.photonProjectId,
+        projectSecret: currentCredentials.spectrumProjectSecret,
+      };
+      const credentials = required(
+        spectrumCredentials,
+        "Spectrum credential setup",
+      );
+      const state = required(composition, "Spectrum startup");
+      const app = await createSpectrumApp(credentials);
+      const resolver = createSpectrumSpaceResolver(app);
+      const conversationPresence = new ConversationPresenceCoordinator({
+        operational: state.operational,
+        resolver:
+          resolver as unknown as import("../transport/space-resolver.js").SpaceResolver<Space>,
+        maximumTypingDurationMs:
+          environment.MAX_TASK_RUNTIME_MS + DEFAULT_TYPING_RUNTIME_BUFFER_MS,
+      });
+      const nativeOutbound = new NativeSpectrumOutboundTransport({
+        operational: state.operational,
+        resolver:
+          resolver as unknown as import("../transport/space-resolver.js").SpaceResolver<Space>,
+        conversationPresence,
+      });
+      const runId = `spectrum-${++nextSpectrumRun}`;
+      const controller = new AbortController();
+      outboundTransport.attach(runId, nativeOutbound);
+      activeConversationPresence = conversationPresence;
+
       const authorizer = new DeterministicSenderAuthorizer({
         deploymentId: environment.DEPLOYMENT_ID,
         fingerprintKey: environment.APP_ENCRYPTION_KEY,
-        directory,
+        directory: state.authorizationDirectory,
         groupPolicy: {
           mode: environment.GROUP_MODE,
           agentHandles: [],
           agentMentionNames: ["agent"],
         },
         replyVerifier: new DatabaseGroupReplyVerifier(
-          client.database,
+          required(databaseClient, "Spectrum startup").database,
           state.operational,
           environment.DEPLOYMENT_ID,
         ),
-        rateLimits: new OperationalRateLimits({
-          messagesPerOwner: {
-            limit: environment.MESSAGE_RATE_LIMIT_PER_MINUTE,
-            windowMs: 60_000,
-          },
-          tasksPerOwner: {
-            limit: environment.TASK_RATE_LIMIT_PER_HOUR,
-            windowMs: 60 * 60 * 1_000,
-          },
-        }),
+        rateLimits: state.rateLimits,
       });
       const consumer = new DurableInboundConsumer({
         operational: state.operational,
@@ -777,36 +1115,87 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
         cipher,
         contentHashKey: environment.APP_ENCRYPTION_KEY,
         rawMessageRetentionDays: environment.RAW_MESSAGE_RETENTION_DAYS,
+        onSpacePersisted: (spaceId, route) => {
+          conversationPresence.associateSpace(spaceId, route);
+        },
       });
-      const boundary = new SecureAuthorizeAndIngest(authorizer, consumer);
-      spectrumLoop = runSpectrumMessageLoop({
+      const commandInterceptor = new AuthorizedInboundCommandInterceptor({
+        deploymentId: environment.DEPLOYMENT_ID,
+        spaces: state.operational,
+        handler: state.approvalCommands,
+        respond: async (inbound, safeResponse, context) => {
+          const spaceId = await state.operational.findInternalSpaceId(
+            environment.DEPLOYMENT_ID,
+            inbound,
+          );
+          if (spaceId === undefined) {
+            throw new Error(
+              "The authorized command space disappeared before its response.",
+            );
+          }
+          await nativeOutbound.send({
+            spaceId,
+            clientGuid: `command-${inbound.externalMessageId}`,
+            text: safeResponse,
+            signal: context.signal ?? controller.signal,
+          });
+        },
+      });
+      const boundary = new SecureAuthorizeAndIngest(
+        authorizer,
+        consumer,
+        commandInterceptor,
+      );
+      const loop = runSpectrumMessageLoop({
         authorizeAndIngest: boundary,
-        messages: () => spectrumApp!.messages,
-        readiness,
-        signal,
+        messages: () => app.messages,
+        readiness: new SpectrumReadiness(),
+        conversationPresence,
+        signal: controller.signal,
         onIgnored: (reason) => {
           logger.debug({ component: "spectrum", reason }, "ignored message event");
         },
       });
-      void spectrumLoop.catch(() => {
-        logger.error(
-          {
-            component: "spectrum",
-            errorCode: "SPECTRUM_STREAM_RESTART_EXHAUSTED",
-          },
-          "Spectrum receive loop stopped after bounded restart attempts",
-        );
-      });
+      const done = loop
+        .then(() => ({ reason: "exited" as const }))
+        .catch(() => {
+          logger.error(
+            {
+              component: "spectrum",
+              errorCode: "SPECTRUM_STREAM_RESTART_EXHAUSTED",
+            },
+            "Spectrum receive loop stopped after bounded restart attempts",
+          );
+          return { reason: "restart_exhausted" as const };
+        })
+        .finally(() => {
+          outboundTransport.detach(runId);
+          if (activeConversationPresence === conversationPresence) {
+            activeConversationPresence = undefined;
+          }
+          activeSpectrumRuns.delete(runId);
+        });
+      activeSpectrumRuns.set(runId, { controller, done });
+      return {
+        runId,
+        done,
+        async stop() {
+          controller.abort();
+          await done;
+        },
+      };
     },
 
     // Shutdown adapters
     async stopSpectrum() {
-      await spectrumLoop?.catch(() => undefined);
-      spectrumLoop = undefined;
-      spectrumApp = undefined;
+      const runs = [...activeSpectrumRuns.values()];
+      for (const run of runs) run.controller.abort();
+      await Promise.all(runs.map((run) => run.done));
     },
 
     async stopCodex() {
+      await modelSettingsService?.close();
+      await photonSetup.close();
       await chatgptSetup?.close();
     },
 
@@ -826,6 +1215,22 @@ export async function createProductionRuntime(): Promise<ProductionRuntime> {
       projectId: credentials.photonProjectId,
       projectSecret: credentials.spectrumProjectSecret,
     };
+    const snapshot = { connected: true, ownerRevisionCurrent: true };
+    for (const listener of photonActivationListeners) {
+      void Promise.resolve(listener(snapshot)).catch(() => undefined);
+    }
+  });
+  photonSetup.onStatusChanged((status) => {
+    if (status.state === "connected") return;
+    spectrumCredentials = undefined;
+    const snapshot = { connected: false, ownerRevisionCurrent: false };
+    for (const listener of photonActivationListeners) {
+      void Promise.resolve(listener(snapshot)).catch(() => undefined);
+    }
+  });
+  deploymentIdentity.onConfigured(async () => {
+    if (photonInstallationService === undefined) return;
+    await photonSetup.refresh();
   });
 
   return {

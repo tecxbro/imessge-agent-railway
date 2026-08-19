@@ -225,20 +225,11 @@ export function ownerContainerTag(deploymentId: string, ownerId: string): string
   );
 }
 
-function combineSignals(
-  callerSignal: AbortSignal | undefined,
-  timeoutMs: number,
-): AbortSignal {
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  return callerSignal === undefined
-    ? timeoutSignal
-    : AbortSignal.any([callerSignal, timeoutSignal]);
-}
-
-function providerError(error: unknown, callerSignal?: AbortSignal): MemoryProviderError {
-  if (error instanceof MemoryProviderError) {
-    return error;
-  }
+function providerError(
+  error: unknown,
+  callerSignal?: AbortSignal,
+  attemptTimedOut = false,
+): MemoryProviderError {
   if (callerSignal?.aborted === true) {
     return new MemoryProviderError(
       "MEMORY_PROVIDER_ABORTED",
@@ -247,8 +238,20 @@ function providerError(error: unknown, callerSignal?: AbortSignal): MemoryProvid
       { cause: error },
     );
   }
+  if (attemptTimedOut) {
+    return new MemoryProviderError(
+      "MEMORY_PROVIDER_TIMEOUT",
+      true,
+      "Supermemory timed out; retry the memory job or continue the turn without recall.",
+      { cause: error },
+    );
+  }
+  if (error instanceof MemoryProviderError) {
+    return error;
+  }
   if (
     error instanceof Supermemory.APIConnectionTimeoutError ||
+    error instanceof Supermemory.APIUserAbortError ||
     (error instanceof DOMException && error.name === "TimeoutError")
   ) {
     return new MemoryProviderError(
@@ -258,7 +261,10 @@ function providerError(error: unknown, callerSignal?: AbortSignal): MemoryProvid
       { cause: error },
     );
   }
-  if (error instanceof Supermemory.RateLimitError) {
+  if (
+    error instanceof Supermemory.RateLimitError ||
+    (error instanceof Supermemory.APIError && error.status === 429)
+  ) {
     return new MemoryProviderError(
       "MEMORY_PROVIDER_RATE_LIMITED",
       true,
@@ -268,7 +274,9 @@ function providerError(error: unknown, callerSignal?: AbortSignal): MemoryProvid
   }
   if (
     error instanceof Supermemory.AuthenticationError ||
-    error instanceof Supermemory.PermissionDeniedError
+    error instanceof Supermemory.PermissionDeniedError ||
+    (error instanceof Supermemory.APIError &&
+      (error.status === 401 || error.status === 403))
   ) {
     return new MemoryProviderError(
       "MEMORY_PROVIDER_AUTH_FAILED",
@@ -277,7 +285,12 @@ function providerError(error: unknown, callerSignal?: AbortSignal): MemoryProvid
       { cause: error },
     );
   }
-  if (error instanceof Supermemory.BadRequestError) {
+  if (
+    error instanceof Supermemory.APIError &&
+    error.status !== undefined &&
+    error.status >= 400 &&
+    error.status < 500
+  ) {
     return new MemoryProviderError(
       "MEMORY_PROVIDER_REJECTED",
       false,
@@ -290,6 +303,137 @@ function providerError(error: unknown, callerSignal?: AbortSignal): MemoryProvid
     true,
     "Supermemory is unavailable; retry the projection job or continue without recall.",
     { cause: error },
+  );
+}
+
+function providerHttpError(status: number): MemoryProviderError {
+  if (status === 401 || status === 403) {
+    return new MemoryProviderError(
+      "MEMORY_PROVIDER_AUTH_FAILED",
+      false,
+      "Supermemory rejected its credentials or container access; verify the configured key and scopes.",
+    );
+  }
+  if (status === 429) {
+    return new MemoryProviderError(
+      "MEMORY_PROVIDER_RATE_LIMITED",
+      true,
+      "Supermemory rate-limited the request; retry after provider backoff.",
+    );
+  }
+  if (status >= 500) {
+    return new MemoryProviderError(
+      "MEMORY_PROVIDER_UNAVAILABLE",
+      true,
+      "Supermemory is unavailable; retry the projection job or continue without recall.",
+    );
+  }
+  return new MemoryProviderError(
+    "MEMORY_PROVIDER_REJECTED",
+    false,
+    "Supermemory rejected a request; verify provider availability and pinned API compatibility.",
+  );
+}
+
+async function discardResponseBody(response: Response): Promise<void> {
+  if (response.body !== null) {
+    try {
+      await response.body.cancel();
+      return;
+    } catch {
+      // A locked stream cannot be canceled here; consume it below if possible.
+    }
+  }
+  try {
+    await response.arrayBuffer();
+  } catch {
+    // The response is already unusable, but retry must not depend on its body.
+  }
+}
+
+async function withAttemptSignal<T>(options: {
+  callerSignal: AbortSignal | undefined;
+  timeoutMs: number;
+  operation: (signal: AbortSignal) => Promise<T>;
+}): Promise<T> {
+  const attemptController = new AbortController();
+  let attemptTimedOut = false;
+  const onCallerAbort = (): void => {
+    attemptController.abort(options.callerSignal?.reason);
+  };
+  options.callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  if (options.callerSignal?.aborted === true) {
+    options.callerSignal.removeEventListener("abort", onCallerAbort);
+    throw providerError(options.callerSignal.reason, options.callerSignal);
+  }
+  const timeout = setTimeout(() => {
+    attemptTimedOut = true;
+    attemptController.abort(
+      new DOMException("Supermemory request attempt timed out.", "TimeoutError"),
+    );
+  }, options.timeoutMs);
+
+  try {
+    return await options.operation(attemptController.signal);
+  } catch (error) {
+    throw providerError(error, options.callerSignal, attemptTimedOut);
+  } finally {
+    clearTimeout(timeout);
+    options.callerSignal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
+async function abortAwareBackoff(
+  retryIndex: number,
+  callerSignal?: AbortSignal,
+): Promise<void> {
+  const exponentialMs = Math.min(100 * 2 ** retryIndex, 1_000);
+  const delayMs = Math.floor(exponentialMs * (0.75 + Math.random() * 0.25));
+
+  await new Promise<void>((resolve, reject) => {
+    const onCallerAbort = (): void => {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+      reject(providerError(callerSignal?.reason, callerSignal));
+    };
+    const timeout = setTimeout(() => {
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+      resolve();
+    }, delayMs);
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+    if (callerSignal?.aborted === true) {
+      onCallerAbort();
+    }
+  });
+}
+
+async function withRetriedRead<T>(options: {
+  callerSignal: AbortSignal | undefined;
+  timeoutMs: number;
+  maxRetries: number;
+  operation: (signal: AbortSignal) => Promise<T>;
+}): Promise<T> {
+  const attempts = options.maxRetries + 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await withAttemptSignal({
+        callerSignal: options.callerSignal,
+        timeoutMs: options.timeoutMs,
+        operation: options.operation,
+      });
+    } catch (error) {
+      const classified = providerError(error, options.callerSignal);
+      if (!classified.retryable || attempt + 1 >= attempts) {
+        throw classified;
+      }
+      await abortAwareBackoff(attempt, options.callerSignal);
+    }
+  }
+
+  throw new MemoryProviderError(
+    "MEMORY_PROVIDER_UNAVAILABLE",
+    true,
+    "Supermemory exhausted its bounded read attempts.",
   );
 }
 
@@ -332,7 +476,7 @@ export class SupermemoryClient implements SupermemoryPort {
         apiKey: this.apiKey,
         baseURL: this.baseUrl,
         timeout: this.timeoutMs,
-        maxRetries: this.maxReadRetries,
+        maxRetries: 0,
         logLevel: "off",
       });
   }
@@ -344,22 +488,25 @@ export class SupermemoryClient implements SupermemoryPort {
     // Validate every provider boundary and retry only bounded reads; writes are
     // not blindly retried because duplicate semantic records are durable.
     const tag = containerTagSchema.parse(containerTag);
-    try {
-      const response = await this.sdk.profile(
-        {
-          containerTag: tag,
-          filters: { AND: [{ key: "scope", value: "owner" }] },
-        },
-        {
-          signal: combineSignals(signal, this.timeoutMs),
-          timeout: this.timeoutMs,
-          maxRetries: this.maxReadRetries,
-        },
-      );
-      return parseProviderResponse(profileResponseSchema, response).profile;
-    } catch (error) {
-      throw providerError(error, signal);
-    }
+    return await withRetriedRead({
+      callerSignal: signal,
+      timeoutMs: this.timeoutMs,
+      maxRetries: this.maxReadRetries,
+      operation: async (attemptSignal) => {
+        const response = await this.sdk.profile(
+          {
+            containerTag: tag,
+            filters: { AND: [{ key: "scope", value: "owner" }] },
+          },
+          {
+            signal: attemptSignal,
+            timeout: this.timeoutMs,
+            maxRetries: 0,
+          },
+        );
+        return parseProviderResponse(profileResponseSchema, response).profile;
+      },
+    });
   }
 
   async searchMemories(input: {
@@ -371,40 +518,43 @@ export class SupermemoryClient implements SupermemoryPort {
     const tag = containerTagSchema.parse(input.containerTag);
     const query = z.string().trim().min(1).max(8_000).parse(input.query);
     const limit = z.number().int().min(1).max(100).parse(input.limit);
-    try {
-      const response = await this.sdk.search(
-        {
-          q: query,
-          containerTag: tag,
-          searchMode: "memories",
-          limit,
-          include: { forgottenMemories: false },
-        },
-        {
-          signal: combineSignals(input.signal, this.timeoutMs),
-          timeout: this.timeoutMs,
-          maxRetries: this.maxReadRetries,
-        },
-      );
-      const parsed = parseProviderResponse(searchResponseSchema, response);
-      return parsed.results.flatMap((result) => {
-        const text = result.memory ?? result.chunk;
-        if (text === undefined || text.trim().length === 0) {
-          return [];
-        }
-        return [
+    return await withRetriedRead({
+      callerSignal: input.signal,
+      timeoutMs: this.timeoutMs,
+      maxRetries: this.maxReadRetries,
+      operation: async (attemptSignal) => {
+        const response = await this.sdk.search(
           {
-            id: result.id,
-            text,
-            similarity: result.similarity,
-            metadata: result.metadata ?? {},
-            updatedAt: result.updatedAt,
+            q: query,
+            containerTag: tag,
+            searchMode: "memories",
+            limit,
+            include: { forgottenMemories: false },
           },
-        ];
-      });
-    } catch (error) {
-      throw providerError(error, input.signal);
-    }
+          {
+            signal: attemptSignal,
+            timeout: this.timeoutMs,
+            maxRetries: 0,
+          },
+        );
+        const parsed = parseProviderResponse(searchResponseSchema, response);
+        return parsed.results.flatMap((result) => {
+          const text = result.memory ?? result.chunk;
+          if (text === undefined || text.trim().length === 0) {
+            return [];
+          }
+          return [
+            {
+              id: result.id,
+              text,
+              similarity: result.similarity,
+              metadata: result.metadata ?? {},
+              updatedAt: result.updatedAt,
+            },
+          ];
+        });
+      },
+    });
   }
 
   async createMemories(input: {
@@ -453,30 +603,32 @@ export class SupermemoryClient implements SupermemoryPort {
     const memoryId = z.string().trim().min(1).max(512).parse(input.memoryId);
     const content = z.string().trim().min(1).max(10_000).parse(input.content);
     const metadata = metadataSchema.parse(input.metadata);
-    try {
-      const response = await this.sdk.memories.updateMemory(
-        {
-          containerTag: tag,
-          id: memoryId,
-          newContent: content,
-          metadata,
-        },
-        {
-          signal: combineSignals(input.signal, this.timeoutMs),
-          timeout: this.timeoutMs,
-          maxRetries: 0,
-        },
-      );
-      const parsed = parseProviderResponse(updateResponseSchema, response);
-      return {
-        id: parsed.id,
-        text: parsed.memory,
-        isStatic: false,
-        createdAt: parsed.createdAt,
-      };
-    } catch (error) {
-      throw providerError(error, input.signal);
-    }
+    return await withAttemptSignal({
+      callerSignal: input.signal,
+      timeoutMs: this.timeoutMs,
+      operation: async (attemptSignal) => {
+        const response = await this.sdk.memories.updateMemory(
+          {
+            containerTag: tag,
+            id: memoryId,
+            newContent: content,
+            metadata,
+          },
+          {
+            signal: attemptSignal,
+            timeout: this.timeoutMs,
+            maxRetries: 0,
+          },
+        );
+        const parsed = parseProviderResponse(updateResponseSchema, response);
+        return {
+          id: parsed.id,
+          text: parsed.memory,
+          isStatic: false,
+          createdAt: parsed.createdAt,
+        };
+      },
+    });
   }
 
   async forgetMemory(input: {
@@ -488,25 +640,31 @@ export class SupermemoryClient implements SupermemoryPort {
     const tag = containerTagSchema.parse(input.containerTag);
     const memoryId = z.string().trim().min(1).max(512).parse(input.memoryId);
     const reason = z.string().trim().min(1).max(500).parse(input.reason);
-    try {
-      const response = await this.sdk.memories.forget(
-        { containerTag: tag, id: memoryId, reason },
-        {
-          signal: combineSignals(input.signal, this.timeoutMs),
-          timeout: this.timeoutMs,
-          maxRetries: 0,
-        },
-      );
-      return parseProviderResponse(forgetResponseSchema, response);
-    } catch (error) {
-      if (
-        error instanceof Supermemory.NotFoundError ||
-        error instanceof Supermemory.ConflictError
-      ) {
-        return { id: memoryId, forgotten: true };
-      }
-      throw providerError(error, input.signal);
-    }
+    return await withAttemptSignal({
+      callerSignal: input.signal,
+      timeoutMs: this.timeoutMs,
+      operation: async (attemptSignal) => {
+        try {
+          const response = await this.sdk.memories.forget(
+            { containerTag: tag, id: memoryId, reason },
+            {
+              signal: attemptSignal,
+              timeout: this.timeoutMs,
+              maxRetries: 0,
+            },
+          );
+          return parseProviderResponse(forgetResponseSchema, response);
+        } catch (error) {
+          if (
+            error instanceof Supermemory.NotFoundError ||
+            error instanceof Supermemory.ConflictError
+          ) {
+            return { id: memoryId, forgotten: true } as const;
+          }
+          throw error;
+        }
+      },
+    });
   }
 
   async listMemories(input: {
@@ -567,69 +725,57 @@ export class SupermemoryClient implements SupermemoryPort {
     },
     callerSignal?: AbortSignal,
   ): Promise<unknown> {
-    const signal = combineSignals(callerSignal, this.timeoutMs);
-    const attempts = options.retryable ? this.maxReadRetries + 1 : 1;
-    let lastError: unknown;
-
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        const requestInit: RequestInit = {
-          method: options.method,
-          headers: {
-            authorization: `Bearer ${this.apiKey}`,
-            "content-type": "application/json",
-          },
-          signal,
+    const operation = async (attemptSignal: AbortSignal): Promise<unknown> => {
+      const requestInit: RequestInit = {
+        method: options.method,
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json",
+        },
+        signal: attemptSignal,
+      };
+      if (options.body !== undefined) {
+        requestInit.body = JSON.stringify(options.body);
+      }
+      const response = await this.request(`${this.baseUrl}${path}`, requestInit);
+      if (response.status === 404 && options.absentContainerTag !== undefined) {
+        await discardResponseBody(response);
+        return {
+          success: true,
+          containerTag: options.absentContainerTag,
+          deletedDocumentsCount: 0,
+          deletedMemoriesCount: 0,
         };
-        if (options.body !== undefined) {
-          requestInit.body = JSON.stringify(options.body);
-        }
-        const response = await this.request(`${this.baseUrl}${path}`, requestInit);
-        if (response.status === 404 && options.absentContainerTag !== undefined) {
-          return {
-            success: true,
-            containerTag: options.absentContainerTag,
-            deletedDocumentsCount: 0,
-            deletedMemoriesCount: 0,
-          };
-        }
-        if (!response.ok) {
-          if (response.status === 401 || response.status === 403) {
-            throw new MemoryProviderError(
-              "MEMORY_PROVIDER_AUTH_FAILED",
-              false,
-              "Supermemory rejected its credentials or container access; verify the configured key and scopes.",
-            );
-          }
-          if (response.status === 429) {
-            throw new MemoryProviderError(
-              "MEMORY_PROVIDER_RATE_LIMITED",
-              true,
-              "Supermemory rate-limited the request; retry after provider backoff.",
-            );
-          }
-          throw new MemoryProviderError(
-            response.status >= 500
-              ? "MEMORY_PROVIDER_UNAVAILABLE"
-              : "MEMORY_PROVIDER_REJECTED",
-            response.status >= 500,
-            "Supermemory rejected a request; verify provider availability and pinned API compatibility.",
-          );
-        }
+      }
+      if (!response.ok) {
+        await discardResponseBody(response);
+        throw providerHttpError(response.status);
+      }
+      try {
         return await response.json();
       } catch (error) {
-        lastError = providerError(error, callerSignal);
-        if (
-          attempt + 1 >= attempts ||
-          !(lastError instanceof MemoryProviderError) ||
-          !lastError.retryable ||
-          signal.aborted
-        ) {
-          throw lastError;
-        }
+        throw new MemoryProviderError(
+          "MEMORY_PROVIDER_INVALID_RESPONSE",
+          false,
+          "Supermemory returned invalid JSON; verify the pinned SDK and API schema before retrying.",
+          { cause: error },
+        );
       }
+    };
+
+    if (options.retryable) {
+      return await withRetriedRead({
+        callerSignal,
+        timeoutMs: this.timeoutMs,
+        maxRetries: this.maxReadRetries,
+        operation,
+      });
     }
 
-    throw providerError(lastError, callerSignal);
+    return await withAttemptSignal({
+      callerSignal,
+      timeoutMs: this.timeoutMs,
+      operation,
+    });
   }
 }

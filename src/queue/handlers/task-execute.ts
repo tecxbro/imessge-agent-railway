@@ -16,16 +16,18 @@ import {
 } from "../../agent/schemas.js";
 import type { PromptBundle } from "../../config/prompt-bundle.js";
 import type { PermissionProfileName } from "../../security/permissions.js";
+import { CodexStartDeniedError } from "../../security/queued-authorization.js";
 import type { QueuePublisher } from "../publisher.js";
 import type { TaskExecutePayload } from "../payloads.js";
 
 export interface TaskExecutionContext {
+  chainId: string;
   ownerId: string;
   task: ExecutionTask;
   modelSelection: ModelSelection;
-  /** Re-resolved from the current code-owned workspace capability at claim time. */
-  maximumPermissionProfile: PermissionProfileName;
-  workspaceRoot: string;
+  /** Re-resolved exact code-owned permission set at claim time. */
+  authorizedPermissionProfiles: readonly PermissionProfileName[];
+  resolvedWorkspacePath: string;
   relevantContext: readonly string[];
   recoverySummary?: string;
 }
@@ -46,6 +48,10 @@ export interface TaskAttemptFailureOutcome extends TaskTerminalOutcome {
 
 export interface TaskExecutionRepository {
   claimTask(payload: TaskExecutePayload): Promise<TaskExecutionContext | null>;
+  denyTaskCodexStart?(input: {
+    payload: TaskExecutePayload;
+    errorCode: string;
+  }): Promise<TaskTerminalOutcome>;
   completeTask(input: {
     payload: TaskExecutePayload;
     result: ExecutionResult;
@@ -66,8 +72,10 @@ export interface TaskExecuteDependencies {
     QueuePublisher,
     "enqueueTaskExecute" | "enqueueTurnSynthesize"
   >;
+  approvalPublisher?: Pick<QueuePublisher, "enqueueApprovalRequest">;
   promptBundle: PromptBundle;
   maximumRuntimeMs?: number;
+  onPresenceEnd?(chainId: string): void;
 }
 
 function safeRuntimeMessage(code: CodexRuntimeErrorCode): string {
@@ -92,6 +100,22 @@ function safeRuntimeMessage(code: CodexRuntimeErrorCode): string {
 }
 
 function runtimeFailure(taskId: string, error: unknown): ExecutionResult {
+  if (error instanceof CodexStartDeniedError) {
+    return executionResultSchema.parse({
+      taskId,
+      status: "failed",
+      userSafeSummary:
+        "This task was denied because its queued authorization is no longer valid.",
+      artifacts: [],
+      proposedActions: [],
+      memoryCandidates: [],
+      error: {
+        code: error.code,
+        retryable: false,
+        safeMessage: error.message,
+      },
+    });
+  }
   const runtimeError =
     error instanceof CodexRuntimeError
       ? error
@@ -173,7 +197,24 @@ export function createTaskExecuteHandler(dependencies: TaskExecuteDependencies) 
   ): Promise<void> => {
     // Claim and version-check the durable task before Codex starts; completion
     // is committed through the same authoritative expected-chain contract.
-    const context = await dependencies.repository.claimTask(payload);
+    let context: TaskExecutionContext | null;
+    try {
+      context = await dependencies.repository.claimTask(payload);
+    } catch (error) {
+      if (
+        error instanceof CodexStartDeniedError &&
+        dependencies.repository.denyTaskCodexStart !== undefined
+      ) {
+        const outcome = await dependencies.repository.denyTaskCodexStart({
+          payload,
+          errorCode: error.code,
+        });
+        await publishOutcome(payload, outcome, dependencies.publisher);
+        dependencies.onPresenceEnd?.(payload.chainId);
+        return;
+      }
+      throw error;
+    }
     if (context === null) {
       return;
     }
@@ -182,11 +223,12 @@ export function createTaskExecuteHandler(dependencies: TaskExecuteDependencies) 
     let run: Awaited<ReturnType<TaskExecuteDependencies["execution"]["run"]>>;
     try {
       run = await dependencies.execution.run({
+        chainId: context.chainId,
         ownerId: context.ownerId,
         task,
-        maximumPermissionProfile: context.maximumPermissionProfile,
+        authorizedPermissionProfiles: context.authorizedPermissionProfiles,
         modelProfile: asCodexModelProfile(context.modelSelection),
-        workspaceRoot: context.workspaceRoot,
+        resolvedWorkspacePath: context.resolvedWorkspacePath,
         policySections: executionPolicySections(
           context,
           dependencies.promptBundle,
@@ -200,6 +242,7 @@ export function createTaskExecuteHandler(dependencies: TaskExecuteDependencies) 
           : { maximumRuntimeMs: dependencies.maximumRuntimeMs }),
       });
     } catch (error) {
+      dependencies.onPresenceEnd?.(context.chainId);
       const failure = runtimeFailure(task.id, error);
       const outcome = await dependencies.repository.failTaskAttempt({
         payload,
@@ -220,6 +263,15 @@ export function createTaskExecuteHandler(dependencies: TaskExecuteDependencies) 
       promptSha256: run.promptSha256,
       recovered: run.recovered,
     });
+    if (
+      outcome.accepted &&
+      run.result.status === "needs_approval" &&
+      dependencies.approvalPublisher !== undefined
+    ) {
+      await dependencies.approvalPublisher.enqueueApprovalRequest({
+        executionTaskId: payload.taskId,
+      });
+    }
     await publishOutcome(payload, outcome, dependencies.publisher);
   };
 }

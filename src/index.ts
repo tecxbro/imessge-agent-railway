@@ -17,6 +17,13 @@ import {
   installShutdownSignals,
   type ShutdownResult,
 } from "./runtime/graceful-shutdown.js";
+import { ActivationCoordinator } from "./runtime/activation-coordinator.js";
+import type {
+  CodexActivationSnapshot,
+  PhotonActivationSnapshot,
+  RecoverySchedule,
+} from "./runtime/activation-state.js";
+import type { SpectrumRunHandle } from "./runtime/spectrum-run-handle.js";
 
 export interface CodexStartupState {
   auth: Extract<ReadinessState, "ok" | "missing" | "failed">;
@@ -39,10 +46,17 @@ export interface AgentServiceBootstrap {
   configureSupermemory(): Promise<
     Extract<ReadinessState, "ok" | "disabled" | "degraded" | "failed">
   >;
-  startSpectrum(input: {
+  startSpectrum?(input: {
     signal: AbortSignal;
     readiness: SpectrumReadiness;
   }): Promise<void>;
+  startSpectrumRun?(): Promise<SpectrumRunHandle>;
+  onCodexActivationChanged?(
+    listener: (snapshot: CodexActivationSnapshot) => void | Promise<void>,
+  ): () => void;
+  onPhotonActivationChanged?(
+    listener: (snapshot: PhotonActivationSnapshot) => void | Promise<void>,
+  ): () => void;
   stopSpectrum?(): Promise<void>;
   stopCodex?(): Promise<void>;
   checkpointOutbound?(): Promise<void>;
@@ -135,32 +149,82 @@ export async function startAgentService(
     stop: () => health.close(),
   });
 
-  let startupStagesReady = false;
-  let codexChecked = false;
-  let codexReady = false;
-  let codexProbeInProgress = false;
-  let spectrumStarted = false;
-  let unlockAgain = false;
-  let forceCodexProbe = false;
-  let unlockPromise: Promise<void> | undefined;
+  let recoveryTimer: NodeJS.Timeout | undefined;
+  const recoveryScheduler = {
+    schedule(recovery: RecoverySchedule): void {
+      if (recoveryTimer !== undefined) clearTimeout(recoveryTimer);
+      recoveryTimer = setTimeout(recovery.fire, recovery.delayMs);
+    },
+    cancel(): void {
+      if (recoveryTimer !== undefined) clearTimeout(recoveryTimer);
+      recoveryTimer = undefined;
+    },
+  };
 
-  const photonConnected = (): boolean =>
-    options.photonSetup === undefined ||
-    options.photonSetup.status().state === "connected";
-  const ownerConfigured = (): boolean =>
-    options.deploymentIdentity === undefined ||
-    options.deploymentIdentity.status().state === "configured";
+  const startLegacySpectrum = async (): Promise<SpectrumRunHandle> => {
+    if (options.bootstrap.startSpectrum === undefined) {
+      throw new Error("No Spectrum run factory is configured.");
+    }
+    const controller = new AbortController();
+    const abortForShutdown = () => controller.abort(shutdown.signal.reason);
+    shutdown.signal.addEventListener("abort", abortForShutdown, { once: true });
+    const runId = `legacy-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await options.bootstrap.startSpectrum({
+      signal: controller.signal,
+      readiness: spectrumReadiness,
+    });
+    let finish!: (completion: { reason: "exited" }) => void;
+    const done = new Promise<{ reason: "exited" }>((resolve) => {
+      finish = resolve;
+    });
+    return {
+      runId,
+      done,
+      async stop() {
+        controller.abort();
+        await options.bootstrap.stopSpectrum?.();
+        shutdown.signal.removeEventListener("abort", abortForShutdown);
+        finish({ reason: "exited" });
+      },
+    };
+  };
 
-  const refreshCodexReadiness = async (): Promise<boolean> => {
-    codexChecked = true;
+  const activation = new ActivationCoordinator({
+    spectrumRunFactory: {
+      start: async () =>
+        options.bootstrap.startSpectrumRun === undefined
+          ? await startLegacySpectrum()
+          : await options.bootstrap.startSpectrumRun(),
+    },
+    recoveryScheduler,
+    readinessSink: {
+      publish(snapshot) {
+        if (snapshot.spectrum === "active") {
+          spectrumReadiness.markConnected();
+        } else if (snapshot.spectrum === "starting") {
+          spectrumReadiness.markStarting();
+        } else if (snapshot.spectrum === "degraded") {
+          spectrumReadiness.markDegraded(
+            "SPECTRUM_STREAM_RESTART_EXHAUSTED",
+            snapshot.recoveryAttempt,
+          );
+          if (snapshot.recoveryAttempt === 1) {
+            options.onStartupFailure?.("SPECTRUM_START_FAILED");
+          }
+        } else {
+          spectrumReadiness.markStopped();
+        }
+      },
+    },
+  });
+
+  const refreshCodexReadiness = async (): Promise<CodexActivationSnapshot> => {
     readiness.mark("codexAuth", "starting");
     readiness.mark("codexCapabilities", "starting");
     let codex: CodexStartupState;
-    codexProbeInProgress = true;
     try {
       codex = await options.bootstrap.checkCodex();
     } catch {
-      codexReady = false;
       readiness.mark("codexAuth", "failed", "CODEX_AUTH_EXPIRED");
       readiness.mark(
         "codexCapabilities",
@@ -168,10 +232,12 @@ export async function startAgentService(
         "CODEX_CAPABILITY_FAILED",
       );
       options.onStartupFailure?.("CODEX_CHECK_FAILED");
-      spectrumReadiness.markStopped();
-      return false;
-    } finally {
-      codexProbeInProgress = false;
+      const snapshot: CodexActivationSnapshot = {
+        auth: "failed",
+        capabilities: "unavailable",
+      };
+      await activation.dispatch({ type: "CodexSnapshotChanged", snapshot });
+      return snapshot;
     }
     readiness.mark("codexAuth", codex.auth, codex.authCode);
     readiness.mark(
@@ -179,77 +245,27 @@ export async function startAgentService(
       codex.capabilities,
       codex.capabilityCode,
     );
-    codexReady = codex.auth === "ok" && codex.capabilities === "ok";
-    return codexReady;
-  };
-
-  const tryUnlockAgent = async (forceProbe: boolean): Promise<void> => {
-    if (!startupStagesReady || shutdown.signal.aborted) {
-      return;
-    }
-
-    if (forceProbe || !codexChecked) {
-      if (!(await refreshCodexReadiness())) {
-        return;
-      }
-    }
-
-    if (spectrumStarted) {
-      return;
-    }
-
-    if (
-      !codexReady ||
-      !ownerConfigured() ||
-      !photonConnected() ||
-      shutdown.signal.aborted
-    ) {
-      spectrumReadiness.markStopped();
-      return;
-    }
-
-    spectrumStarted = true;
-    spectrumReadiness.markStarting();
-    try {
-      await options.bootstrap.startSpectrum({
-        signal: shutdown.signal,
-        readiness: spectrumReadiness,
-      });
-    } catch {
-      spectrumStarted = false;
-      spectrumReadiness.markDegraded("SPECTRUM_STREAM_DISCONNECTED", 1);
-      options.onStartupFailure?.("SPECTRUM_START_FAILED");
-    }
-  };
-
-  const requestUnlock = (forceProbe: boolean): Promise<void> => {
-    unlockAgain = true;
-    forceCodexProbe ||= forceProbe;
-    unlockPromise ??= Promise.resolve()
-      .then(async () => {
-        // Start only after unlockPromise is assigned so synchronous callbacks
-        // cannot enter requestUnlock and create a second runner.
-        while (unlockAgain && !shutdown.signal.aborted) {
-          const probe = forceCodexProbe;
-          unlockAgain = false;
-          forceCodexProbe = false;
-          await tryUnlockAgent(probe);
-        }
-      })
-      .finally(() => {
-        unlockPromise = undefined;
-        if (unlockAgain && !shutdown.signal.aborted) {
-          return requestUnlock(false);
-        }
-        return undefined;
-      });
-    return unlockPromise;
+    const snapshot: CodexActivationSnapshot = {
+      auth:
+        codex.auth === "ok"
+          ? "ready"
+          : codex.auth === "missing"
+            ? "missing"
+            : "failed",
+      capabilities:
+        codex.capabilities === "ok" ? "available" : "unavailable",
+    };
+    await activation.dispatch({ type: "CodexSnapshotChanged", snapshot });
+    return snapshot;
   };
 
   const disposeIdentityListener = options.deploymentIdentity?.onConfigured(
     async () => {
       readiness.mark("ownerIdentity", "ok");
-      await requestUnlock(false);
+      await activation.dispatch({
+        type: "OwnerSnapshotChanged",
+        snapshot: { configured: true },
+      });
     },
   );
   if (disposeIdentityListener !== undefined) {
@@ -262,21 +278,34 @@ export async function startAgentService(
       },
     });
   }
-  options.photonSetup?.onConnected?.(() => requestUnlock(false));
-  options.chatgptSetup?.onConnected(() => requestUnlock(true));
-  const disposeCapabilitiesListener =
-    options.chatgptSetup?.onCapabilitiesChanged((capabilities) => {
-      if (capabilities.state === "refreshing" || codexProbeInProgress) {
-        return;
-      }
-      void requestUnlock(true);
+  const disposePhotonListener =
+    options.bootstrap.onPhotonActivationChanged?.(async (snapshot) => {
+      await activation.dispatch({ type: "PhotonSnapshotChanged", snapshot });
+    }) ??
+    options.photonSetup?.onConnected?.(async () => {
+      await activation.dispatch({
+        type: "PhotonSnapshotChanged",
+        snapshot: { connected: true, ownerRevisionCurrent: true },
+      });
     });
-  if (disposeCapabilitiesListener !== undefined) {
+  options.chatgptSetup?.onConnected(async () => {
+    await refreshCodexReadiness();
+  });
+  const disposeCodexListener = options.bootstrap.onCodexActivationChanged?.(
+    async (snapshot) => {
+      await activation.dispatch({ type: "CodexSnapshotChanged", snapshot });
+    },
+  );
+  for (const [name, dispose] of [
+    ["photon-activation-listener", disposePhotonListener],
+    ["codex-activation-listener", disposeCodexListener],
+  ] as const) {
+    if (dispose === undefined) continue;
     shutdown.register({
-      name: "codex-capabilities-listener",
+      name,
       priority: 5,
       timeoutMs: 1_000,
-      stop: async () => disposeCapabilitiesListener(),
+      stop: async () => dispose(),
     });
   }
 
@@ -371,6 +400,15 @@ export async function startAgentService(
       }
     }
 
+    await activation.dispatch({
+      type: "OwnerSnapshotChanged",
+      snapshot: {
+        configured:
+          options.deploymentIdentity === undefined ||
+          options.deploymentIdentity.status().state === "configured",
+      },
+    });
+
     readiness.mark("queue", "starting");
     await runStartupStage("QUEUE_UNAVAILABLE", options.bootstrap.startQueue);
     readiness.mark("queue", "ok");
@@ -391,14 +429,26 @@ export async function startAgentService(
       });
     }
     await refreshCodexReadiness();
-    if (options.bootstrap.stopSpectrum !== undefined) {
-      shutdown.register({
-        name: "spectrum",
-        priority: 10,
-        timeoutMs: 10_000,
-        stop: options.bootstrap.stopSpectrum,
-      });
-    }
+    await activation.dispatch({
+      type: "PhotonSnapshotChanged",
+      snapshot: {
+        connected:
+          options.photonSetup === undefined ||
+          options.photonSetup.status().state === "connected",
+        ownerRevisionCurrent:
+          options.photonSetup === undefined ||
+          options.photonSetup.status().state === "connected",
+      },
+    });
+    shutdown.register({
+      name: "spectrum-activation",
+      priority: 10,
+      timeoutMs: 10_000,
+      stop: async () => {
+        await activation.dispatch({ type: "ShutdownRequested" });
+        await activation.idle();
+      },
+    });
 
     const memoryState = await options.bootstrap.configureSupermemory();
     readiness.mark(
@@ -406,10 +456,8 @@ export async function startAgentService(
       memoryState,
       memoryState === "failed" ? "SUPERMEMORY_CONFIGURATION_INVALID" : undefined,
     );
-    startupStagesReady = true;
-    await requestUnlock(
-      options.chatgptSetup?.status().state === "connected" && !codexReady,
-    );
+    await activation.dispatch({ type: "StartupCompleted" });
+    await activation.idle();
   } catch (error) {
     const code =
       error instanceof StartupStageError ? error.code : "STARTUP_FAILED";

@@ -59,6 +59,7 @@ The test plan therefore treats models and providers as replaceable dependencies 
 - Empty or malformed catalogs fail closed; every cursor is followed and hidden
   models are not requested.
 - Account plan/catalog changes refresh state and logout clears it.
+- One refresh produces one catalog persistence and one probe of the required effective pair; capability events do not invoke a duplicate refresh path.
 - The model cannot choose a harness model through structured output.
 - Only the effective pair is probed; unsupported unused models do not fail
   readiness.
@@ -125,6 +126,7 @@ Fake CLI emits JSONL for:
 - Add/update/delete.
 - Timeout and rate limit.
 - Unexpected response schema.
+- Application timeout retry creates a fresh abort signal for every SDK attempt.
 
 ## 5. Integration tests
 
@@ -155,6 +157,8 @@ Use a disposable PostgreSQL database and real pg-boss.
 - Failed dependency blocks or changes downstream behavior according to policy.
 - One synthesis job is created after terminal states.
 - Partial success remains available.
+- The seeded `personal` workspace binding resolves under the configured workspace root.
+- A claimed task re-resolves its binding and rejects any permission profile outside the binding's authorized set.
 
 ### Model settings and chain snapshots
 
@@ -182,6 +186,8 @@ Use a disposable PostgreSQL database and real pg-boss.
 - Duplicate candidate hash deduplicated.
 - Timeout does not block turn.
 - Deletion receipt and cache invalidation.
+- Direct, accepted task, and synthesis candidates commit encrypted in the same transaction as their authoritative result.
+- Queue publication failure leaves the completed response and candidates durable; completion/restart reconciliation republishes the missing job.
 
 ### Approvals
 
@@ -189,6 +195,18 @@ Use a disposable PostgreSQL database and real pg-boss.
 - Compare-and-set under concurrent replies.
 - Action mutation invalidates approval.
 - Canceled chain cannot consume approval.
+- A collaborator/non-owner cannot approve.
+- Concurrent or duplicate execute jobs invoke the registered action exactly once with the stored payload and no Codex reinterpretation.
+- Reconciliation repairs missing `approval.request` and `approval.execute` jobs and consumes an approved record left without an action row by a crash.
+
+### Activation and Photon lifecycle
+
+- Owner, current-revision Photon, Codex auth, and capability loss each stop Spectrum intake.
+- Recovery starts exactly one Spectrum run, including late-start and stale-timer races.
+- Restart exhaustion clears active run ownership before bounded recovery.
+- Owner replacement increments the binding revision in the identity transaction and invalidates the prior Photon installation.
+- A connected Photon credential cannot enable Spectrum until exact validation succeeds for the current owner revision.
+- Read-receipt send failure is best-effort and cannot change stream readiness or restart accounting.
 
 ## 6. End-to-end scenarios
 
@@ -257,7 +275,10 @@ Use a disposable PostgreSQL database and real pg-boss.
 | After outbound materialization | send job resumes all pending parts |
 | Mid-send | stable GUID and cursor prevent duplicates |
 | During memory write | operational response remains complete; memory job retries |
+| After memory candidate commit, before queue publication | reconciliation publishes the missing `memory.curate` job |
 | Spectrum stream disconnect | readiness degraded; supervised reconnect |
+| Capability/Photon/owner loss while Spectrum is active | intake stops; durable workers stay up |
+| Spectrum restart exhaustion | active run ID is cleared before recovery is scheduled |
 | PostgreSQL unavailable | readiness false; no untracked execution |
 | ChatGPT auth expires | execution pauses; operator remediation surfaced |
 | Persistent volume missing | readiness false; no fresh untracked threads |
@@ -268,6 +289,8 @@ Run chaos tests repeatedly with randomized kill points.
 
 - Unknown sender produces zero Codex process starts.
 - Disabled owner produces zero process starts.
+- Principal/contributor revocation after queueing produces zero process starts.
+- Task-rate denial produces zero process starts.
 - Group quote/forward does not transfer authorization.
 - Pairing brute force and replay.
 - Prompt injection in user text, memory, README, issue, web page, and worker output.
@@ -279,6 +302,9 @@ Run chaos tests repeatedly with randomized kill points.
 - Approval action hash mutation/replay/expiry.
 - Log and database failure-event secret scan.
 - Cross-owner memory and outbound routing isolation.
+- Every `src/db/repositories/**` module is statically independent of queue handlers.
+- Runtime modules do not import HTTP-specific model-setting errors.
+- Production interaction/task/synthesis Codex calls reach `ThreadStore` with a chain ID and are decorated by `SecureStructuredCodexRunner`.
 
 ## 9. Performance and load
 
@@ -340,3 +366,27 @@ The integration PR includes:
 - Secret scan report.
 - Migration and rollback evidence.
 - Known limitations and deferred tests.
+
+## 13. Priority-fix acceptance matrix
+
+These checks are mandatory for the integrated priority-fix release. They are offline evidence unless the row explicitly names a live provider.
+
+| Acceptance invariant | Required evidence |
+|---|---|
+| Revoked queued sender starts zero Codex children | secure queued-runner unit test |
+| Task-rate-limited work starts zero Codex children | secure queued-runner unit test |
+| Capability loss stops Spectrum | activation coordinator unit/chaos test |
+| Capability recovery starts exactly one Spectrum run | service lifecycle and activation race tests |
+| Spectrum exhaustion clears active ownership | service lifecycle chaos test |
+| Current owner revision is required for Photon | Photon service unit, repository integration, and recovery chaos tests |
+| Read-receipt failure cannot affect stream health | message-loop/read-receipt isolation test |
+| Personal workspace delegation works | execution capability and execution runtime tests |
+| Non-owner approval is rejected | approval request unit and PostgreSQL integration tests |
+| Approved action executes exactly once | approval action PostgreSQL integration test |
+| Memory curation survives queue publication failure | durable stage recovery chaos test |
+| Model refresh causes one persistence and one required probe | model settings service and startup tests |
+| Supermemory timeout retry uses a fresh signal | Supermemory client integration test |
+| No database repository imports queue handlers | architecture import-direction test over the full repository directory |
+| No user-work runtime bypasses `SecureStructuredCodexRunner` | architecture composition test plus interaction/execution chain-ID assertions |
+
+Release verification runs `npm run typecheck`, `npm test`, `npm run test:integration` against a disposable PostgreSQL database, `npm run test:chaos`, `npm run docs:check`, and `git diff --check`. Migration evidence includes both a clean database and an upgraded database that already contains migrations `0000` through `0004`.

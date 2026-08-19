@@ -86,7 +86,7 @@ curl --silent --show-error http://127.0.0.1:10000/readyz
 | `CODEX_HOME` | absolute directory, mode `0700` | | |
 | Workspace root | separate absolute directory, mode `0700` | | |
 | Codex auth | chosen mode reported; no secret printed | | |
-| Public setup page | HTTP 200 without a password; phone setup remains in the dashboard; readiness is claimed only after critical checks pass | | |
+| Setup page | HTTP 200; phone setup remains in the dashboard; readiness is claimed only after critical checks pass | | |
 | `/healthz` | HTTP 200 | | |
 | `/readyz` | HTTP 200 only after every critical component is ready | | |
 | Authorized first message | one terminal response | | |

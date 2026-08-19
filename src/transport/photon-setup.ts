@@ -3,6 +3,10 @@ import { Buffer } from "node:buffer";
 import { z } from "zod";
 
 import type { DeploymentIdentityController } from "../runtime/deployment-identity.js";
+import type {
+  PhotonDeviceTokenExchange,
+  PhotonInstallationProviderPort,
+} from "./photon-installation-contracts.js";
 
 const PHOTON_DASHBOARD_HOST = "https://app.photon.codes";
 const PHOTON_SPECTRUM_HOST = "https://spectrum.photon.codes";
@@ -13,6 +17,7 @@ const DEVICE_GRANT_TYPE =
   "urn:ietf:params:oauth:grant-type:device_code";
 const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const DEFAULT_DEVICE_EXPIRY_SECONDS = 1_800;
+const PHOTON_REQUEST_TIMEOUT_MS = 30_000;
 
 const boundedText = z.string().trim().min(1).max(16_384);
 const e164PhoneNumber = z.string().regex(/^\+[1-9]\d{7,14}$/u);
@@ -118,6 +123,13 @@ interface PhotonSetupServiceOptions {
 
 function defaultSleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function boundedProviderSignal(signal: AbortSignal): AbortSignal {
+  return AbortSignal.any([
+    signal,
+    AbortSignal.timeout(PHOTON_REQUEST_TIMEOUT_MS),
+  ]);
 }
 
 function safeObject(value: unknown): Record<string, unknown> {
@@ -617,6 +629,310 @@ export class PhotonSetupService implements PhotonSetupController {
     if (!response.ok) {
       throw new PhotonSetupError("PHOTON_USER_SETUP_FAILED");
     }
+    return unwrapObjectList(await response.json());
+  }
+}
+
+/**
+ * HTTP adapter for the durable installation state machine. The workflow owns
+ * when credentials are issued or rotated; this adapter only performs the
+ * requested provider operation and never persists a secret itself.
+ */
+export class PhotonInstallationHttpProvider
+  implements PhotonInstallationProviderPort
+{
+  public constructor(private readonly fetchImplementation: typeof fetch = fetch) {}
+
+  public async requestDeviceAuthorization(input: {
+    operationId: string;
+    signal: AbortSignal;
+  }) {
+    const response = await this.fetchImplementation(
+      `${PHOTON_DASHBOARD_HOST}/api/auth/device/code`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_id: PHOTON_CLIENT_ID, scope: PHOTON_SCOPE }),
+        signal: boundedProviderSignal(input.signal),
+      },
+    );
+    if (!response.ok) {
+      throw new Error("Photon device authorization request failed.");
+    }
+    const code = deviceCodeSchema.parse(await response.json());
+    return {
+      deviceCode: code.device_code,
+      userCode: code.user_code,
+      verificationUrl: code.verification_uri_complete ?? code.verification_uri,
+      expiresAt: new Date(
+        Date.now() +
+          (code.expires_in ?? DEFAULT_DEVICE_EXPIRY_SECONDS) * 1_000,
+      ),
+      pollIntervalMs:
+        (code.interval ?? DEFAULT_POLL_INTERVAL_SECONDS) * 1_000,
+    };
+  }
+
+  public async exchangeDeviceCode(input: {
+    deviceCode: string;
+    operationId: string;
+    signal: AbortSignal;
+  }): Promise<PhotonDeviceTokenExchange> {
+    const response = await this.fetchImplementation(
+      `${PHOTON_DASHBOARD_HOST}/api/auth/device/token`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: DEVICE_GRANT_TYPE,
+          device_code: input.deviceCode,
+          client_id: PHOTON_CLIENT_ID,
+        }),
+        signal: boundedProviderSignal(input.signal),
+      },
+    );
+    if (response.status === 200) {
+      const candidates = tokenCandidates(
+        safeObject(await response.json()),
+        response.headers,
+      );
+      const managementToken = candidates[0];
+      return managementToken === undefined
+        ? { state: "denied" }
+        : { state: "authorized", managementToken };
+    }
+    if (response.status === 429) {
+      return { state: "slow_down", retryAfterMs: 10_000 };
+    }
+    if (response.status === 400) {
+      const body = safeObject(await response.json());
+      const code = stringField(body, "error") ?? stringField(body, "message");
+      if (code === "authorization_pending") return { state: "pending" };
+      if (code === "slow_down") return { state: "slow_down" };
+      if (code === "expired_token") return { state: "expired" };
+    }
+    return { state: "denied" };
+  }
+
+  public async validateManagementToken(input: {
+    managementToken: string;
+    signal: AbortSignal;
+  }): Promise<boolean> {
+    const headers = { authorization: `Bearer ${input.managementToken}` };
+    const [session, projects] = await Promise.all([
+      this.fetchImplementation(`${PHOTON_DASHBOARD_HOST}/api/auth/get-session`, {
+        headers,
+        signal: boundedProviderSignal(input.signal),
+      }),
+      this.fetchImplementation(`${PHOTON_DASHBOARD_HOST}/api/projects/`, {
+        headers,
+        signal: boundedProviderSignal(input.signal),
+      }),
+    ]);
+    if (!session.ok || !projects.ok) return false;
+    try {
+      const sessionBody = safeObject(await session.json());
+      if (
+        typeof sessionBody["user"] !== "object" ||
+        sessionBody["user"] === null
+      ) {
+        return false;
+      }
+      unwrapObjectList(await projects.json());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  public async createProject(input: {
+    installationId: string;
+    operationId: string;
+    managementToken: string;
+    projectName: string;
+    signal: AbortSignal;
+  }): Promise<{ photonProjectId: string }> {
+    const response = await this.fetchImplementation(
+      `${PHOTON_DASHBOARD_HOST}/api/projects`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${input.managementToken}`,
+          "content-type": "application/json",
+          "idempotency-key": input.installationId,
+        },
+        body: JSON.stringify({
+          name: input.projectName,
+          location: "United States",
+          template: false,
+          observability: false,
+        }),
+        signal: boundedProviderSignal(input.signal),
+      },
+    );
+    if (!response.ok) throw new Error("Photon project creation failed.");
+    const body = safeObject(await response.json());
+    const data =
+      typeof body["data"] === "object" && body["data"] !== null
+        ? safeObject(body["data"])
+        : body;
+    const photonProjectId = stringField(data, "id");
+    if (photonProjectId === undefined) {
+      throw new Error("Photon project creation returned no project ID.");
+    }
+    return { photonProjectId };
+  }
+
+  public async provisionInitialProjectSecret(input: {
+    installationId: string;
+    operationId: string;
+    managementToken: string;
+    photonProjectId: string;
+    signal: AbortSignal;
+  }): Promise<{ spectrumProjectSecret: string }> {
+    // The stable installation key is what makes an ambiguous first issuance
+    // retry the same provider operation. Explicit repair uses a new operation
+    // key below and is the only path allowed to rotate intentionally.
+    return await this.rotate(input, input.installationId);
+  }
+
+  public async rotateProjectSecret(input: {
+    operationId: string;
+    managementToken: string;
+    photonProjectId: string;
+    signal: AbortSignal;
+  }): Promise<{ spectrumProjectSecret: string }> {
+    return await this.rotate(input, input.operationId);
+  }
+
+  private async rotate(input: {
+    managementToken: string;
+    photonProjectId: string;
+    signal: AbortSignal;
+  }, idempotencyKey: string): Promise<{ spectrumProjectSecret: string }> {
+    const response = await this.fetchImplementation(
+      `${PHOTON_DASHBOARD_HOST}/api/projects/${encodeURIComponent(input.photonProjectId)}/regenerate-secret`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${input.managementToken}`,
+          "content-type": "application/json",
+          "idempotency-key": idempotencyKey,
+        },
+        body: JSON.stringify({}),
+        signal: boundedProviderSignal(input.signal),
+      },
+    );
+    if (!response.ok) throw new Error("Photon project credential issuance failed.");
+    const spectrumProjectSecret = stringField(
+      safeObject(await response.json()),
+      "projectSecret",
+    );
+    if (spectrumProjectSecret === undefined) {
+      throw new Error("Photon project credential response was incomplete.");
+    }
+    return { spectrumProjectSecret };
+  }
+
+  public async registerOwner(input: {
+    operationId: string;
+    photonProjectId: string;
+    spectrumProjectSecret: string;
+    ownerPhoneNumber: string;
+    signal: AbortSignal;
+  }): Promise<{ assignedIMessageNumber: string }> {
+    const authorization = this.basic(
+      input.photonProjectId,
+      input.spectrumProjectSecret,
+    );
+    let user = (await this.users(input.photonProjectId, authorization, input.signal)).find(
+      (candidate) =>
+        normalizePhoneNumber(stringField(candidate, "phoneNumber") ?? "") ===
+        normalizePhoneNumber(input.ownerPhoneNumber),
+    );
+    if (user === undefined) {
+      const response = await this.fetchImplementation(
+        `${PHOTON_SPECTRUM_HOST}/projects/${encodeURIComponent(input.photonProjectId)}/users/`,
+        {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({ type: "shared", phoneNumber: input.ownerPhoneNumber }),
+          signal: boundedProviderSignal(input.signal),
+        },
+      );
+      if (!response.ok) throw new Error("Photon owner registration failed.");
+      const body = safeObject(await response.json());
+      user = safeObject(body["user"] ?? body["data"] ?? body);
+    }
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      const assigned = stringField(user, "assignedPhoneNumber");
+      if (assigned !== undefined) {
+        return { assignedIMessageNumber: e164PhoneNumber.parse(assigned) };
+      }
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 2_000);
+        input.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(input.signal.reason);
+          },
+          { once: true },
+        );
+      });
+      user = (await this.users(input.photonProjectId, authorization, input.signal)).find(
+        (candidate) =>
+          normalizePhoneNumber(stringField(candidate, "phoneNumber") ?? "") ===
+          normalizePhoneNumber(input.ownerPhoneNumber),
+      );
+      if (user === undefined) break;
+    }
+    throw new Error("Photon assigned-number provisioning did not complete.");
+  }
+
+  public async validateProjectCredential(input: {
+    photonProjectId: string;
+    spectrumProjectSecret: string;
+    ownerPhoneNumber: string;
+    assignedIMessageNumber: string;
+    signal: AbortSignal;
+  }): Promise<boolean> {
+    try {
+      const users = await this.users(
+        input.photonProjectId,
+        this.basic(input.photonProjectId, input.spectrumProjectSecret),
+        input.signal,
+      );
+      return users.some(
+        (candidate) =>
+          normalizePhoneNumber(stringField(candidate, "phoneNumber") ?? "") ===
+            normalizePhoneNumber(input.ownerPhoneNumber) &&
+          normalizePhoneNumber(
+            stringField(candidate, "assignedPhoneNumber") ?? "",
+          ) === normalizePhoneNumber(input.assignedIMessageNumber),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private basic(projectId: string, secret: string): string {
+    return `Basic ${Buffer.from(`${projectId}:${secret}`, "utf8").toString("base64")}`;
+  }
+
+  private async users(
+    projectId: string,
+    authorization: string,
+    signal: AbortSignal,
+  ): Promise<Array<Record<string, unknown>>> {
+    const response = await this.fetchImplementation(
+      `${PHOTON_SPECTRUM_HOST}/projects/${encodeURIComponent(projectId)}/users/`,
+      {
+        headers: { authorization },
+        signal: boundedProviderSignal(signal),
+      },
+    );
+    if (!response.ok) throw new Error("Photon users lookup failed.");
     return unwrapObjectList(await response.json());
   }
 }

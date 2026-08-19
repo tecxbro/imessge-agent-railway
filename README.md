@@ -32,11 +32,10 @@ The production shape uses one Railway application service, one PostgreSQL 18 ser
 
 Railway provides `PORT`, `RAILWAY_SERVICE_ID`, `RAILWAY_DEPLOYMENT_ID`, and `RAILWAY_VOLUME_MOUNT_PATH` at runtime. Do not define fake local values for those platform inputs.
 
-## Public dashboard and owner setup
+## Dashboard and owner setup
 
-The setup dashboard is public. Anyone who can reach the service URL can view its setup status, device codes, masked owner status, assigned Photon number, and detailed readiness, and can attempt setup changes. Use the URL only while you accept that exposure; add an external access-control layer before using this template where public setup is unacceptable.
-
-Dashboard mutations still require a same-origin browser request and reject cross-site fetch metadata. That prevents ordinary drive-by cross-site submissions, but it is not authentication: a person who deliberately opens the public dashboard can change setup.
+Dashboard setup requests require a same-origin browser request and reject
+cross-site fetch metadata.
 
 The dashboard collects the owner's phone number before Photon setup. U.S. entry is the default, so the owner can type a normal 10-digit number without `+1`; **Not in the U.S.?** reveals a country selector, and international users may enter a national or complete international number. The server validates the selected country and normalizes the value to E.164 before storage. The phone number is configured in the dashboard rather than required in the environment. It is encrypted and fingerprinted in PostgreSQL, becomes the only iMessage sender authorized to use the agent, and is registered during Photon owner provisioning. The different Photon-assigned number shown at completion is the destination the owner texts. Replacing the owner number in the dashboard revokes the previous owner identity before the new identity can authorize messages.
 
@@ -84,9 +83,14 @@ curl --silent --show-error "https://<service-host>/readyz"
 
 - `/healthz` returning 200 means the HTTP process is alive.
 - `/readyz` returning 200 means owner identity, critical storage, PostgreSQL, migration, queue, Codex, and Spectrum checks are ready.
-- `/readyz` returning 503 means setup is incomplete or a dependency is degraded. Its public response includes the detailed component snapshot and remediation actions.
+- `/readyz` returning 503 means setup is incomplete or a dependency is degraded. Its response includes the detailed component snapshot and remediation actions.
 
-The root URL is a public setup entry point, not an iMessage chat. Provider setup status, device codes, verification URLs, the assigned number, masked owner information, detailed readiness, and bounded provider error codes are public there. Raw owner phone values, provider access tokens, project secrets, Codex credentials, database credentials, and unrestricted provider errors remain server-side.
+The root URL opens the setup dashboard; it is not an iMessage chat. The
+dashboard reports provider setup status, device codes, verification URLs, the
+assigned number, masked owner information, detailed readiness, and bounded
+provider error codes. Raw owner phone values, provider access tokens, project
+secrets, Codex credentials, database credentials, and unrestricted provider
+errors remain server-side.
 
 ## Send the first iMessage
 
@@ -125,7 +129,7 @@ The most common edits are:
 | Execution behavior | `prompts/execution.system.md` |
 | Approval rules | `prompts/approval-policy.md` |
 | Models and reasoning effort | **Advanced** in the deployment dashboard |
-| Authorized sender | **Change phone number** in the public dashboard; owner environment values are migration inputs only |
+| Authorized sender | **Change phone number** in the deployment dashboard; owner environment values are migration inputs only |
 | Semantic memory | `SUPERMEMORY_API_KEY` |
 | Railway build and deploy behavior | `railway.json` |
 | Service, database, volume, variables, and networking | Railway project settings |
@@ -214,7 +218,7 @@ PostgreSQL is the operational source of truth. Supermemory stores only bounded, 
 ## Security and privacy
 
 - Unknown senders are rejected before persistence, queueing, or model work.
-- The setup dashboard is public. Same-origin checks reduce drive-by cross-site mutations but do not authenticate visitors.
+- Dashboard setup mutations require same-origin and fetch-metadata validation.
 - Authorization is checked again immediately before Codex or another child process starts.
 - Codex children receive an explicit environment allowlist, never the full server environment.
 - Models cannot approve actions or broaden code-owned permission profiles.

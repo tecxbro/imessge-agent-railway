@@ -34,7 +34,7 @@ Never place credentials in source control, screenshots, tickets, database rows, 
 |---|---|---|
 | Application service | Source repository, `main`, one replica | Public setup dashboard, health HTTP, queue workers, Codex runtime, Spectrum loop |
 | PostgreSQL | PostgreSQL 18 service | Operational source of truth and pg-boss queue |
-| Persistent volume | Mounted at `/var/data` | Codex credentials, sessions, Photon credentials, and workspaces |
+| Persistent volume | Mounted at `/var/data` | Codex credentials, sessions, and workspaces |
 
 Review current Railway pricing and quotas before deployment. The volume makes this version single-instance; do not add replicas or remove the volume without redesigning credential and workspace ownership.
 
@@ -57,13 +57,14 @@ For migrated installations, preserve the existing `DEPLOYMENT_ID` and `APP_ENCRY
 
 Railway injects `PORT`, `RAILWAY_SERVICE_ID`, `RAILWAY_DEPLOYMENT_ID`, and `RAILWAY_VOLUME_MOUNT_PATH`. Do not override them. Fresh deployments do not set an owner phone or dashboard credential service variable; the phone stays in the dashboard. `SUPERMEMORY_API_KEY`, limits, legacy owner inputs, and existing Spectrum credentials are optional/advanced settings documented in [Configuration](./CONFIGURATION.md). Model and reasoning settings are stored through **Advanced** in the dashboard.
 
-## 5. Public setup dashboard
+## 5. Setup dashboard
 
 1. Open the deployed Railway application URL in a trusted browser.
 2. Save the owner's phone, complete Photon setup, and then complete ChatGPT setup.
 3. After ChatGPT connects, open **Advanced** and confirm or change the deployment model and reasoning effort.
 
-There is no dashboard password or operator session. Anyone who can reach the public service URL can view setup status, device codes, verification URLs, assigned number, masked owner status, bounded error codes, and detailed readiness, and can deliberately submit setup changes. A matching `Origin` and non-cross-site fetch context block ordinary drive-by cross-site mutations, but they do not authenticate a visitor.
+Dashboard setup mutations require a matching `Origin` and a non-cross-site
+fetch context.
 
 Owner status returns only a masked phone, and the write route never echoes the submitted raw number. Photon setup is unavailable until an owner is stored. Raw provider credentials, project secrets, Codex credentials, database credentials, and unrestricted provider errors remain server-side.
 
@@ -76,7 +77,7 @@ The default mode is `CODEX_AUTH_MODE=chatgpt`.
 3. Save the owner phone and complete Photon authentication on the public agent dashboard.
 4. Select **Connect ChatGPT**, open the device-auth popup, sign in, and enter the one-time code.
 5. Keep the dashboard open. It closes the popup when the browser permits, returns focus to setup, and shows Codex preparing.
-6. Confirm the dashboard reaches **Your agent is ready** and public `/readyz` returns HTTP 200.
+6. Confirm the dashboard reaches **Your agent is ready** and `/readyz` returns HTTP 200.
 
 Credentials persist under `/var/data/codex`. Do not print or copy `$CODEX_HOME/auth.json`. A private Railway SSH session remains an operator recovery path:
 
@@ -117,7 +118,7 @@ Expected results:
 - A fresh deployment before owner setup is expected to return `/healthz` 200 and `/readyz` 503.
 - Supermemory may be `disabled` or `degraded` without blocking the operational pipeline.
 
-Public readiness includes component states, bounded error codes, and remediation actions. It never includes raw owner phone values, credentials, private paths, or unrestricted provider errors. Do not use `/healthz` as deployment acceptance.
+The readiness response includes component states, bounded error codes, and remediation actions. It never includes raw owner phone values, credentials, private paths, or unrestricted provider errors. Do not use `/healthz` as deployment acceptance.
 
 ## 9. First-message test
 
@@ -145,7 +146,7 @@ Offline unit, integration, and chaos tests do not prove a live Railway, Photon, 
 For an existing Railway installation:
 
 1. Preserve the existing `DEPLOYMENT_ID`, `APP_ENCRYPTION_KEY`, PostgreSQL state, persistent volume, and provider credentials.
-2. Keep the existing owner migration variable for the first deployment of this version. The runtime accepts `OWNER_PHONE_NUMBER`, the former `OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123` alias, or one unambiguous E.164 `AGENT_OWNER_HANDLES` value. Conflicting phone variables, multiple handles, or a non-phone handle require dashboard migration.
+2. Keep the existing owner migration variable for the first deployment of this version. The runtime accepts `OWNER_PHONE_NUMBER`, the former `OWNER_PHONE_NUMBER_E164_EXAMPLE_PLUS19495550123` alias, or one unambiguous E.164 `AGENT_OWNER_HANDLES` value. Conflicting phone variables, multiple handles, or a non-phone handle require dashboard migration. A legacy Photon credential file may be imported into the durable installation record, but Spectrum remains blocked until the provider validates it for the current owner revision.
 3. Remove obsolete model-selection service variables from older releases; model selection now lives in PostgreSQL and is managed through **Advanced** in the dashboard.
 4. Remove `AGENT_PASSWORD` and `DASHBOARD_SETUP_SECRET` before startup if either key exists, including with an empty value.
 5. Deploy the migration and application once, confirm the dashboard shows the masked migrated owner, and verify an authorized message from that owner. Only then remove the old owner environment variable if desired.

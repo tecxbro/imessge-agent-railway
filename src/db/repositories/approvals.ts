@@ -1,10 +1,20 @@
 import { randomUUID } from "node:crypto";
 
 import { and, asc, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
+import { z } from "zod";
 
-import type { ApprovalPersistence, StoredApprovalRecord } from "../../security/approvals.js";
-import type { Database } from "../client.js";
+import { executionResultSchema, type ExecutionResult } from "../../agent/schemas.js";
+import type {
+  ApprovalChainProgression,
+  ApprovalExpiryOutcome,
+  ApprovalPersistence,
+  ApprovalResponseOutcome,
+  StoredApprovalRecord,
+} from "../../security/approvals.js";
+import { actionExecutions } from "../schema-fragments/approval-executions.js";
+import type { Database, DatabaseTransaction } from "../client.js";
 import {
+  agentThreads,
   approvals,
   chains,
   channelIdentities,
@@ -43,8 +53,42 @@ export interface ConsumeApprovedActionInput {
   executionTaskId: string;
   expectedActionHash: string;
   expectedPayloadCiphertext: string;
+  actionExecutionId?: string;
+  actionType?: string;
   now?: Date;
 }
+
+export interface ApprovalRepositoryOptions {
+  encryptExecutionResult?(plaintext: string): Promise<string> | string;
+}
+
+export interface DurableApprovalRequestContext {
+  ownerId: string;
+  spaceId: string;
+  chainId: string;
+  executionTaskId: string;
+  logicalTaskId: string;
+  executionResultCiphertext: string;
+}
+
+export interface ApprovalExpiryScope {
+  ownerId: string;
+  spaceId: string;
+}
+
+export interface ApprovedActionRecovery {
+  approvalId: string;
+  ownerId: string;
+  spaceId: string;
+  executionTaskId: string;
+}
+
+const storedExecutionResultSchema = z
+  .object({ ciphertext: z.string().min(1) })
+  .strict();
+
+const dependencyIdsSchema = z.array(z.uuid()).max(5);
+const terminalTaskStates = ["succeeded", "failed", "canceled"] as const;
 
 const approvalSelection = {
   id: approvals.id,
@@ -61,10 +105,14 @@ const approvalSelection = {
 };
 
 export class ApprovalRepository implements ApprovalPersistence {
-  public constructor(private readonly database: Database) {}
+  public constructor(
+    private readonly database: Database,
+    private readonly options: ApprovalRepositoryOptions = {},
+  ) {}
 
   public async createPending(input: CreateApprovalInput): Promise<string> {
     const approvalId = input.id ?? randomUUID();
+    let storedApprovalId = approvalId;
     await this.database.transaction(async (transaction) => {
       await transaction.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${input.spaceId}, 0))`,
@@ -112,6 +160,54 @@ export class ApprovalRepository implements ApprovalPersistence {
         );
       }
 
+      const [existing] = await transaction
+        .select({
+          id: approvals.id,
+          chainId: approvals.chainId,
+          ownerId: approvals.ownerId,
+          spaceId: approvals.spaceId,
+          actionType: approvals.actionType,
+        })
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.executionTaskId, input.executionTaskId),
+            eq(approvals.actionHash, input.actionHash),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (existing !== undefined) {
+        if (
+          existing.chainId !== input.chainId ||
+          existing.ownerId !== input.ownerId ||
+          existing.spaceId !== input.spaceId ||
+          existing.actionType !== input.actionType
+        ) {
+          throw new Error(
+            "Approval idempotency key resolved to a differently scoped action. Reject the request and inspect durable state.",
+          );
+        }
+        storedApprovalId = existing.id;
+        return;
+      }
+
+      const [otherActive] = await transaction
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(
+          and(
+            eq(approvals.executionTaskId, input.executionTaskId),
+            inArray(approvals.status, ["pending", "approved"]),
+          ),
+        )
+        .limit(1);
+      if (otherActive !== undefined) {
+        throw new Error(
+          "The execution task already has a differently hashed active approval. Reject the changed payload.",
+        );
+      }
+
       await transaction.insert(approvals).values({
         id: approvalId,
         chainId: input.chainId,
@@ -142,7 +238,7 @@ export class ApprovalRepository implements ApprovalPersistence {
         );
       }
     });
-    return approvalId;
+    return storedApprovalId;
   }
 
   public async findBound(
@@ -162,6 +258,119 @@ export class ApprovalRepository implements ApprovalPersistence {
       )
       .limit(1);
     return row;
+  }
+
+  public async loadApprovalRequestContext(
+    executionTaskId: string,
+  ): Promise<DurableApprovalRequestContext | null> {
+    const [row] = await this.database
+      .select({
+        ownerId: agentThreads.ownerId,
+        spaceId: chains.spaceId,
+        chainId: chains.id,
+        chainVersion: chains.version,
+        executionTaskId: executionTasks.id,
+        logicalTaskId: executionTasks.name,
+        taskState: executionTasks.state,
+        chainState: chains.state,
+        canceledAt: chains.canceledAt,
+        resultJson: executionTasks.resultJson,
+      })
+      .from(executionTasks)
+      .innerJoin(chains, eq(chains.id, executionTasks.chainId))
+      .innerJoin(agentThreads, eq(agentThreads.id, executionTasks.agentThreadId))
+      .where(eq(executionTasks.id, executionTaskId))
+      .limit(1);
+    if (
+      row === undefined ||
+      row.taskState !== "needs_approval" ||
+      !["executing", "awaiting_approval"].includes(row.chainState) ||
+      row.canceledAt !== null
+    ) {
+      return null;
+    }
+    const [current] = await this.database
+      .select({ version: sql<number>`max(${chains.version})` })
+      .from(chains)
+      .where(eq(chains.spaceId, row.spaceId));
+    if (current?.version !== row.chainVersion) {
+      return null;
+    }
+    const stored = storedExecutionResultSchema.safeParse(row.resultJson);
+    if (!stored.success) {
+      throw new Error(
+        "Approval request task has no exact encrypted execution result. Re-run the task before requesting approval.",
+      );
+    }
+    return {
+      ownerId: row.ownerId,
+      spaceId: row.spaceId,
+      chainId: row.chainId,
+      executionTaskId: row.executionTaskId,
+      logicalTaskId: row.logicalTaskId,
+      executionResultCiphertext: stored.data.ciphertext,
+    };
+  }
+
+  /** Re-publishes idempotent request jobs after a commit/publication crash. */
+  public async findApprovalRequestTaskIds(limit = 100): Promise<string[]> {
+    const rows = await this.database
+      .select({ taskId: executionTasks.id })
+      .from(executionTasks)
+      .innerJoin(chains, eq(chains.id, executionTasks.chainId))
+      .where(
+        and(
+          eq(executionTasks.state, "needs_approval"),
+          inArray(chains.state, ["executing", "awaiting_approval"]),
+          isNull(chains.canceledAt),
+        ),
+      )
+      .orderBy(asc(executionTasks.updatedAt), asc(executionTasks.id))
+      .limit(limit);
+    return rows.map((row) => row.taskId);
+  }
+
+  /** Finds bounded owner/space scopes whose pending approvals need expiry. */
+  public async findExpiredApprovalScopes(
+    now = new Date(),
+    limit = 100,
+  ): Promise<ApprovalExpiryScope[]> {
+    return await this.database
+      .selectDistinct({ ownerId: approvals.ownerId, spaceId: approvals.spaceId })
+      .from(approvals)
+      .where(
+        and(
+          inArray(approvals.status, ["pending", "approved"]),
+          lte(approvals.expiresAt, now),
+          isNull(approvals.consumedAt),
+        ),
+      )
+      .orderBy(asc(approvals.ownerId), asc(approvals.spaceId))
+      .limit(limit);
+  }
+
+  /** Repairs a crash after owner approval but before atomic action creation. */
+  public async findApprovedActionRecoveries(
+    now = new Date(),
+    limit = 100,
+  ): Promise<ApprovedActionRecovery[]> {
+    return await this.database
+      .select({
+        approvalId: approvals.id,
+        ownerId: approvals.ownerId,
+        spaceId: approvals.spaceId,
+        executionTaskId: approvals.executionTaskId,
+      })
+      .from(approvals)
+      .where(
+        and(
+          eq(approvals.status, "approved"),
+          gt(approvals.expiresAt, now),
+          isNull(approvals.consumedAt),
+        ),
+      )
+      .orderBy(asc(approvals.updatedAt), asc(approvals.id))
+      .limit(limit);
   }
 
   public async listPending(
@@ -185,6 +394,12 @@ export class ApprovalRepository implements ApprovalPersistence {
   }
 
   public async compareAndSetResponse(input: ApprovalResponseInput): Promise<boolean> {
+    return (await this.compareAndSetResponseWithProgression(input)).changed;
+  }
+
+  public async compareAndSetResponseWithProgression(
+    input: ApprovalResponseInput,
+  ): Promise<ApprovalResponseOutcome> {
     const now = input.now ?? new Date();
     if (input.approvedByIdentityId === undefined) {
       throw new Error(
@@ -218,7 +433,7 @@ export class ApprovalRepository implements ApprovalPersistence {
         )
         .limit(1);
       if (actor === undefined) {
-        return false;
+        return { changed: false, progression: null };
       }
 
       const rows = await transaction
@@ -254,28 +469,52 @@ export class ApprovalRepository implements ApprovalPersistence {
           executionTaskId: approvals.executionTaskId,
         });
       const changed = rows[0];
-      if (changed !== undefined && input.status === "rejected") {
-        await transaction
+      if (changed === undefined) {
+        return { changed: false, progression: null };
+      }
+      if (input.status === "rejected") {
+        const taskResult = await this.encryptedTerminalTaskResult(
+          transaction,
+          changed.executionTaskId,
+          "canceled",
+          "The owner rejected the proposed action.",
+          "APPROVAL_REJECTED",
+        );
+        const canceledTask = await transaction
           .update(executionTasks)
-          .set({ state: "canceled", completedAt: now, updatedAt: now })
+          .set({
+            state: "canceled",
+            ...(taskResult === undefined ? {} : { resultJson: taskResult }),
+            completedAt: now,
+            updatedAt: now,
+          })
           .where(
             and(
               eq(executionTasks.id, changed.executionTaskId),
               eq(executionTasks.state, "needs_approval"),
             ),
+          )
+          .returning({ id: executionTasks.id });
+        if (canceledTask.length !== 1) {
+          throw new Error(
+            "Approval rejection lost the execution-task transition. The transaction was rolled back.",
           );
-        await transaction
-          .update(chains)
-          .set({ state: "executing", updatedAt: now })
-          .where(
-            and(
-              eq(chains.id, changed.chainId),
-              eq(chains.state, "awaiting_approval"),
-              isNull(chains.canceledAt),
-            ),
-          );
+        }
+        await this.failBlockedDependents(transaction, changed.chainId, now);
+        const progression = await this.progressionForChain(
+          transaction,
+          changed.chainId,
+          now,
+        );
+        return {
+          changed: true,
+          progression:
+            this.options.encryptExecutionResult === undefined
+              ? null
+              : progression,
+        };
       }
-      return changed !== undefined;
+      return { changed: true, progression: null };
     });
   }
 
@@ -362,7 +601,7 @@ export class ApprovalRepository implements ApprovalPersistence {
       if (consumed.length !== 1) {
         return false;
       }
-      await transaction
+      const taskStarted = await transaction
         .update(executionTasks)
         .set({ state: "running", startedAt: now, updatedAt: now })
         .where(
@@ -370,7 +609,38 @@ export class ApprovalRepository implements ApprovalPersistence {
             eq(executionTasks.id, input.executionTaskId),
             eq(executionTasks.state, "needs_approval"),
           ),
+        )
+        .returning({ id: executionTasks.id });
+      if (taskStarted.length !== 1) {
+        throw new Error(
+          "Approval consumption lost the execution-task transition. The transaction was rolled back.",
         );
+      }
+      if (
+        input.actionExecutionId !== undefined &&
+        input.actionType !== undefined
+      ) {
+        const insertedExecution = await transaction
+          .insert(actionExecutions)
+          .values({
+            id: input.actionExecutionId,
+            approvalId: input.approvalId,
+            executionTaskId: input.executionTaskId,
+            ownerId: input.ownerId,
+            spaceId: input.spaceId,
+            actionType: input.actionType,
+            normalizedPayloadCiphertext: input.expectedPayloadCiphertext,
+            actionHash: input.expectedActionHash,
+            status: "pending",
+            updatedAt: now,
+          })
+          .returning({ id: actionExecutions.id });
+        if (insertedExecution.length !== 1) {
+          throw new Error(
+            "Approval consumption could not create one durable action execution. The transaction was rolled back.",
+          );
+        }
+      }
       await transaction
         .update(chains)
         .set({ state: "executing", updatedAt: now })
@@ -384,6 +654,15 @@ export class ApprovalRepository implements ApprovalPersistence {
     spaceId: string,
     now: Date,
   ): Promise<number> {
+    return (await this.expireStaleWithProgression(ownerId, spaceId, now))
+      .expiredCount;
+  }
+
+  public async expireStaleWithProgression(
+    ownerId: string,
+    spaceId: string,
+    now: Date,
+  ): Promise<ApprovalExpiryOutcome> {
     return this.database.transaction(async (transaction) => {
       await transaction.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${spaceId}, 0))`,
@@ -406,33 +685,224 @@ export class ApprovalRepository implements ApprovalPersistence {
           executionTaskId: approvals.executionTaskId,
         });
       if (rows.length > 0) {
-        await transaction
-          .update(executionTasks)
-          .set({ state: "canceled", completedAt: now, updatedAt: now })
-          .where(
-            and(
-              inArray(
-                executionTasks.id,
-                rows.map((row) => row.executionTaskId),
-              ),
-              eq(executionTasks.state, "needs_approval"),
-            ),
+        for (const row of rows) {
+          const taskResult = await this.encryptedTerminalTaskResult(
+            transaction,
+            row.executionTaskId,
+            "canceled",
+            "The proposed action expired before approval.",
+            "APPROVAL_EXPIRED",
           );
-        await transaction
-          .update(chains)
-          .set({ state: "executing", updatedAt: now })
-          .where(
-            and(
-              inArray(
-                chains.id,
-                rows.map((row) => row.chainId),
+          const canceledTask = await transaction
+            .update(executionTasks)
+            .set({
+              state: "canceled",
+              ...(taskResult === undefined ? {} : { resultJson: taskResult }),
+              completedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(executionTasks.id, row.executionTaskId),
+                eq(executionTasks.state, "needs_approval"),
               ),
-              eq(chains.state, "awaiting_approval"),
-              isNull(chains.canceledAt),
-            ),
-          );
+            )
+            .returning({ id: executionTasks.id });
+          if (canceledTask.length !== 1) {
+            throw new Error(
+              "Approval expiry lost the execution-task transition. The transaction was rolled back.",
+            );
+          }
+        }
       }
-      return rows.length;
+      const chainIds = [...new Set(rows.map((row) => row.chainId))];
+      const progressions: ApprovalChainProgression[] = [];
+      for (const chainId of chainIds) {
+        await this.failBlockedDependents(transaction, chainId, now);
+        const progression = await this.progressionForChain(
+          transaction,
+          chainId,
+          now,
+        );
+        if (
+          progression !== null &&
+          this.options.encryptExecutionResult !== undefined
+        ) {
+          progressions.push(progression);
+        }
+      }
+      return { expiredCount: rows.length, progressions };
     });
+  }
+
+  private async encryptedTerminalTaskResult(
+    transaction: DatabaseTransaction,
+    executionTaskId: string,
+    status: "failed" | "canceled",
+    safeSummary: string,
+    errorCode: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (this.options.encryptExecutionResult === undefined) {
+      return undefined;
+    }
+    const [task] = await transaction
+      .select({ logicalTaskId: executionTasks.name })
+      .from(executionTasks)
+      .where(eq(executionTasks.id, executionTaskId))
+      .limit(1);
+    if (task === undefined) {
+      return undefined;
+    }
+    const result: ExecutionResult = executionResultSchema.parse({
+      taskId: task.logicalTaskId,
+      status,
+      userSafeSummary: safeSummary,
+      artifacts: [],
+      proposedActions: [],
+      memoryCandidates: [],
+      error: {
+        code: errorCode,
+        retryable: false,
+        safeMessage: safeSummary,
+      },
+    });
+    return {
+      ciphertext: await this.options.encryptExecutionResult(
+        JSON.stringify(result),
+      ),
+    };
+  }
+
+  private async failBlockedDependents(
+    transaction: DatabaseTransaction,
+    chainId: string,
+    now: Date,
+  ): Promise<void> {
+    if (this.options.encryptExecutionResult === undefined) {
+      return;
+    }
+    const rows = await transaction
+      .select({
+        id: executionTasks.id,
+        state: executionTasks.state,
+        dependencies: executionTasks.dependsOnJson,
+      })
+      .from(executionTasks)
+      .where(eq(executionTasks.chainId, chainId))
+      .orderBy(asc(executionTasks.createdAt), asc(executionTasks.id));
+    const states = new Map(rows.map((row) => [row.id, row.state]));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const row of rows) {
+        if (states.get(row.id) !== "queued") {
+          continue;
+        }
+        const dependencies = dependencyIdsSchema.parse(row.dependencies);
+        if (
+          dependencies.some((dependency) => {
+            const state = states.get(dependency);
+            return state === "failed" || state === "canceled";
+          })
+        ) {
+          const taskResult = await this.encryptedTerminalTaskResult(
+            transaction,
+            row.id,
+            "failed",
+            "This task could not run because an approved prerequisite did not complete.",
+            "APPROVAL_PREREQUISITE_UNAVAILABLE",
+          );
+          await transaction
+            .update(executionTasks)
+            .set({
+              state: "failed",
+              ...(taskResult === undefined ? {} : { resultJson: taskResult }),
+              completedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(executionTasks.id, row.id),
+                eq(executionTasks.state, "queued"),
+              ),
+            );
+          states.set(row.id, "failed");
+          changed = true;
+        }
+      }
+    }
+  }
+
+  private async progressionForChain(
+    transaction: DatabaseTransaction,
+    chainId: string,
+    now: Date,
+  ): Promise<ApprovalChainProgression | null> {
+    const [chain] = await transaction
+      .select({
+        id: chains.id,
+        version: chains.version,
+        state: chains.state,
+        canceledAt: chains.canceledAt,
+      })
+      .from(chains)
+      .where(eq(chains.id, chainId))
+      .for("update")
+      .limit(1);
+    if (chain === undefined || chain.canceledAt !== null) {
+      return null;
+    }
+    const tasks = await transaction
+      .select({
+        id: executionTasks.id,
+        state: executionTasks.state,
+        dependencies: executionTasks.dependsOnJson,
+      })
+      .from(executionTasks)
+      .where(eq(executionTasks.chainId, chainId))
+      .orderBy(asc(executionTasks.createdAt), asc(executionTasks.id));
+    const states = new Map(tasks.map((task) => [task.id, task.state]));
+    const stillAwaitingApproval = [...states.values()].some(
+      (state) => state === "needs_approval",
+    );
+    if (!stillAwaitingApproval && chain.state === "awaiting_approval") {
+      await transaction
+        .update(chains)
+        .set({ state: "executing", updatedAt: now })
+        .where(
+          and(
+            eq(chains.id, chainId),
+            eq(chains.state, "awaiting_approval"),
+            isNull(chains.canceledAt),
+          ),
+        );
+    }
+    const newlyRunnableTasks = tasks
+      .filter(
+        (task) =>
+          task.state === "queued" &&
+          dependencyIdsSchema
+            .parse(task.dependencies)
+            .every((dependency) => states.get(dependency) === "succeeded"),
+      )
+      .map((task) => ({
+        taskId: task.id,
+        chainId,
+        expectedChainVersion: chain.version,
+        expectedState: "queued" as const,
+      }));
+    const shouldSynthesize =
+      tasks.length > 0 &&
+      [...states.values()].every((state) =>
+        terminalTaskStates.includes(
+          state as (typeof terminalTaskStates)[number],
+        ),
+      );
+    return {
+      chainId,
+      expectedChainVersion: chain.version,
+      newlyRunnableTasks,
+      shouldSynthesize,
+    };
   }
 }

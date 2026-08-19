@@ -43,6 +43,14 @@ export const outboundSendPayloadSchema = z
   })
   .strict();
 
+export const approvalRequestPayloadSchema = z
+  .object({ executionTaskId: idSchema })
+  .strict();
+
+export const approvalExecutePayloadSchema = z
+  .object({ actionExecutionId: idSchema })
+  .strict();
+
 export const memoryCuratePayloadSchema = z
   .object({
     chainId: idSchema,
@@ -60,6 +68,8 @@ export const QUEUE_PAYLOAD_SCHEMAS = {
   [QUEUE_NAMES.taskExecute]: taskExecutePayloadSchema,
   [QUEUE_NAMES.turnSynthesize]: turnSynthesizePayloadSchema,
   [QUEUE_NAMES.outboundSend]: outboundSendPayloadSchema,
+  [QUEUE_NAMES.approvalRequest]: approvalRequestPayloadSchema,
+  [QUEUE_NAMES.approvalExecute]: approvalExecutePayloadSchema,
   [QUEUE_NAMES.memoryCurate]: memoryCuratePayloadSchema,
   [QUEUE_NAMES.maintenanceRetention]: maintenanceRetentionPayloadSchema,
   [QUEUE_NAMES.maintenanceHealth]: maintenanceHealthPayloadSchema,
@@ -70,6 +80,8 @@ export type TurnPlanPayload = z.infer<typeof turnPlanPayloadSchema>;
 export type TaskExecutePayload = z.infer<typeof taskExecutePayloadSchema>;
 export type TurnSynthesizePayload = z.infer<typeof turnSynthesizePayloadSchema>;
 export type OutboundSendPayload = z.infer<typeof outboundSendPayloadSchema>;
+export type ApprovalRequestPayload = z.infer<typeof approvalRequestPayloadSchema>;
+export type ApprovalExecutePayload = z.infer<typeof approvalExecutePayloadSchema>;
 export type MemoryCuratePayload = z.infer<typeof memoryCuratePayloadSchema>;
 export type MaintenanceRetentionPayload = z.infer<
   typeof maintenanceRetentionPayloadSchema
@@ -84,6 +96,8 @@ export interface QueuePayloadByName {
   [QUEUE_NAMES.taskExecute]: TaskExecutePayload;
   [QUEUE_NAMES.turnSynthesize]: TurnSynthesizePayload;
   [QUEUE_NAMES.outboundSend]: OutboundSendPayload;
+  [QUEUE_NAMES.approvalRequest]: ApprovalRequestPayload;
+  [QUEUE_NAMES.approvalExecute]: ApprovalExecutePayload;
   [QUEUE_NAMES.memoryCurate]: MemoryCuratePayload;
   [QUEUE_NAMES.maintenanceRetention]: MaintenanceRetentionPayload;
   [QUEUE_NAMES.maintenanceHealth]: MaintenanceHealthPayload;

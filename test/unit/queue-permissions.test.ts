@@ -22,6 +22,8 @@ describe("queue contracts", () => {
       "task.execute",
       "turn.synthesize",
       "outbound.send",
+      "approval.request",
+      "approval.execute",
       "memory.curate",
       "maintenance.retention",
       "maintenance.health",

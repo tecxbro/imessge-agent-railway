@@ -4,6 +4,7 @@ import { executionResultSchema, executionTaskSchema } from "../../src/agent/sche
 import { DEFAULT_MODEL_SELECTION } from "../../src/agent/model-selection.js";
 import { loadPromptBundle } from "../../src/config/prompt-bundle.js";
 import { createTaskExecuteHandler } from "../../src/queue/handlers/task-execute.js";
+import { CodexStartDeniedError } from "../../src/security/queued-authorization.js";
 
 const taskId = "40000000-0000-4000-8000-000000000001";
 const chainId = "40000000-0000-4000-8000-000000000002";
@@ -54,11 +55,12 @@ describe("Step 5 task execution handler", () => {
     const handler = createTaskExecuteHandler({
       repository: {
         claimTask: async () => ({
+          chainId: payload.chainId,
           ownerId: "40000000-0000-4000-8000-000000000005",
           task,
           modelSelection: DEFAULT_MODEL_SELECTION,
-          maximumPermissionProfile: "read",
-          workspaceRoot: "/tmp/workspaces",
+          authorizedPermissionProfiles: ["read"],
+          resolvedWorkspacePath: "/tmp/workspaces/primary-repo",
           relevantContext: [],
         }),
         completeTask,
@@ -112,11 +114,12 @@ describe("Step 5 task execution handler", () => {
     const handler = createTaskExecuteHandler({
       repository: {
         claimTask: async () => ({
+          chainId: payload.chainId,
           ownerId: "40000000-0000-4000-8000-000000000005",
           task,
           modelSelection: DEFAULT_MODEL_SELECTION,
-          maximumPermissionProfile: "read",
-          workspaceRoot: "/tmp/workspaces",
+          authorizedPermissionProfiles: ["read"],
+          resolvedWorkspacePath: "/tmp/workspaces/primary-repo",
           relevantContext: [],
         }),
         completeTask: async () => ({
@@ -148,5 +151,40 @@ describe("Step 5 task execution handler", () => {
       expectedChainVersion: 2,
       expectedState: "executing",
     });
+  });
+
+  it("terminalizes a claim-time authorization denial without starting Codex", async () => {
+    const executionRun = vi.fn();
+    const denyTaskCodexStart = vi.fn(async () => ({
+      accepted: true,
+      readyTasks: [],
+      shouldSynthesize: true,
+    }));
+    const enqueueTurnSynthesize = vi.fn(async () => undefined);
+    const handler = createTaskExecuteHandler({
+      repository: {
+        claimTask: async () => {
+          throw new CodexStartDeniedError("CODEX_START_IDENTITY_REVOKED");
+        },
+        denyTaskCodexStart,
+        completeTask: vi.fn(),
+        failTaskAttempt: vi.fn(),
+      },
+      execution: { run: executionRun },
+      publisher: {
+        enqueueTaskExecute: vi.fn(),
+        enqueueTurnSynthesize,
+      },
+      promptBundle: await loadPromptBundle(),
+    });
+
+    await handler(payload);
+
+    expect(executionRun).not.toHaveBeenCalled();
+    expect(denyTaskCodexStart).toHaveBeenCalledWith({
+      payload,
+      errorCode: "CODEX_START_IDENTITY_REVOKED",
+    });
+    expect(enqueueTurnSynthesize).toHaveBeenCalledOnce();
   });
 });
