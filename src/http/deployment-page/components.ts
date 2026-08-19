@@ -117,7 +117,16 @@ function renderPhotonAction(status: PhotonSetupStatus): string {
     return `<div class="auth-flow">
       <p>Open Photon and enter this one-time code.</p>
       ${renderAuthenticationCode("photon", "Photon", status.userCode)}
-      <a class="button" href="${escapeHtml(status.verificationUrl)}" target="_blank" rel="noreferrer" data-auth-link="photon">Open Photon</a>
+      <a
+        class="button"
+        href="${escapeHtml(status.verificationUrl)}"
+        target="_blank"
+        rel="noreferrer"
+        data-auth-link="photon"
+        data-auth-status="photon-auth-status"
+        aria-describedby="photon-auth-status"
+      >Open Photon</a>
+      <p id="photon-auth-status" class="auth-link-status" aria-live="polite"></p>
     </div>`;
   }
   if (status.state === "provisioning") {
@@ -144,7 +153,16 @@ function renderChatGptAction(
     return `<div class="auth-flow">
       <p>Open ChatGPT, sign in, and enter this one-time code.</p>
       ${renderAuthenticationCode("chatgpt", "ChatGPT", status.userCode)}
-      <a class="button" href="${escapeHtml(status.verificationUrl)}" target="_blank" rel="noreferrer" data-auth-link="chatgpt">Sign in with ChatGPT</a>
+      <a
+        class="button"
+        href="${escapeHtml(status.verificationUrl)}"
+        target="_blank"
+        rel="noreferrer"
+        data-auth-link="chatgpt"
+        data-auth-status="chatgpt-auth-status"
+        aria-describedby="chatgpt-auth-status"
+      >Sign in with ChatGPT</a>
+      <p id="chatgpt-auth-status" class="auth-link-status" aria-live="polite"></p>
     </div>`;
   }
   if (status.state === "starting") {

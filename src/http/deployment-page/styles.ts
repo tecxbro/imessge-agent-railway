@@ -79,7 +79,7 @@ export const DEPLOYMENT_PAGE_STYLES = `    @font-face {
     .owner-replace[open] .owner-form { margin-block-start: 1rem; }
     .codex-progress { position: relative; inline-size: 100%; block-size: 0.35rem; margin-block-start: 1.35rem; overflow: hidden; border-radius: 999rem; background: var(--line); }
     .codex-progress span { display: block; inline-size: 34%; block-size: 100%; border-radius: inherit; background: var(--accent); animation: codex-progress 1.4s ease-in-out infinite; transform: translateX(-110%); }
-    .device-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+    .device-code-row { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.75rem; }
     .device-code { display: block; padding: 0.85rem 1rem; border: 0.0625rem solid var(--line); border-radius: 0.4rem; background: var(--soft); font: 750 clamp(1.2rem, 6vw, 2rem) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.08em; }
     .button { display: inline-flex; min-block-size: 3rem; align-items: center; justify-content: center; padding: 0.72rem 1.15rem; border: 0.0625rem solid var(--accent); border-radius: 999rem; background: var(--accent); color: white; font: inherit; font-size: 1rem; font-variation-settings: "wght" 550; text-decoration: none; cursor: pointer; transition: transform 160ms ease, background-color 160ms ease; }
     .button:hover, .button:focus-visible { background: var(--accent-hover); transform: translateY(-0.1rem); }
@@ -90,11 +90,12 @@ export const DEPLOYMENT_PAGE_STYLES = `    @font-face {
     .error + .button { margin-block-start: 0.75rem; }
     .ready-card { display: grid; gap: 1.5rem; margin-block-start: 2rem; padding-block: 2rem; border-block: 0.0625rem solid var(--line); }
     .ready-list { display: grid; gap: 0.7rem; margin: 0; padding: 0; list-style: none; font-size: 1.35rem; }
-    .agent-start { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem 1.5rem; }
+    .agent-start { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1rem 1.5rem; }
     .agent-number { display: grid; gap: 0.2rem; }
     .agent-number span { color: var(--muted); }
     .agent-number strong { font-size: clamp(2rem, 7vw, 3.5rem); font-weight: 400; letter-spacing: -0.035em; }
     .agent-or { color: var(--muted); }
+    .agent-or, .text-agent-button { margin-block-end: 1rem; }
     .text-agent-button { flex: 0 0 auto; }
     .ready-message { margin: 0; font-size: 1.3rem; }
     .advanced-card { margin-block-start: 1.5rem; }
@@ -112,6 +113,7 @@ export const DEPLOYMENT_PAGE_STYLES = `    @font-face {
     .secondary-button:hover, .secondary-button:focus-visible { background: var(--soft); }
     .copy-code-button { flex: 0 0 auto; }
     .copy-code-status { min-block-size: 1.5rem; margin: 0; color: var(--muted); }
+    .auth-link-status { min-block-size: 1.5rem; margin: 0; color: var(--muted); }
     #model-settings-status:empty, #model-fallback-explanation[hidden] { display: none; }
     .site-footer { border-block-start: 0.0625rem solid var(--line); background: var(--soft); }
     .footer-inner { display: flex; inline-size: min(100% - 2.5rem, 64rem); min-block-size: 5rem; margin-inline: auto; align-items: center; justify-content: space-between; gap: 1.5rem; padding-block: 1rem; }
@@ -122,7 +124,7 @@ export const DEPLOYMENT_PAGE_STYLES = `    @font-face {
     .visually-hidden { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
     @keyframes enter { from { opacity: 0; transform: translateY(0.6rem); } to { opacity: 1; transform: translateY(0); } }
     @keyframes codex-progress { 0% { transform: translateX(-110%); } 55% { transform: translateX(105%); } 100% { transform: translateX(300%); } }
-    @media (max-width: 32rem) { .card-heading { align-items: flex-start; } .state { max-inline-size: 10rem; } .ready-shell { padding-block: 1.5rem; } .ready-shell h1 { font-size: 2.6rem; } .ready-card { gap: 1.1rem; margin-block-start: 1.25rem; padding-block: 1.25rem; } .ready-list { gap: 0.45rem; font-size: 1.15rem; } .agent-start { align-items: flex-start; flex-direction: column; gap: 0.8rem; } .ready-message { font-size: 1.1rem; } .footer-inner { align-items: flex-start; flex-direction: column; gap: 0.25rem; } .footer-links { justify-content: flex-start; } }
+    @media (max-width: 32rem) { .card-heading { align-items: flex-start; } .state { max-inline-size: 10rem; } .ready-shell { padding-block: 1.5rem; } .ready-shell h1 { font-size: 2.6rem; } .ready-card { gap: 1.1rem; margin-block-start: 1.25rem; padding-block: 1.25rem; } .ready-list { gap: 0.45rem; font-size: 1.15rem; } .agent-start { align-items: flex-start; flex-direction: column; gap: 0.8rem; } .agent-or, .text-agent-button { margin-block-end: 0; } .ready-message { font-size: 1.1rem; } .footer-inner { align-items: flex-start; flex-direction: column; gap: 0.25rem; } .footer-links { justify-content: flex-start; } }
     @media (prefers-contrast: more) { :root { --muted: #3f3f3d; --line: #777772; } .card, .device-code { border-width: 0.125rem; } }
     @media (prefers-contrast: forced) { .codex-progress { border: 0.125rem solid CanvasText; } .codex-progress span { background: Highlight; } }
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; } .codex-progress span { inline-size: 38%; animation: none !important; opacity: 0.55; transform: none; } }`;

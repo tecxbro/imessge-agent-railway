@@ -438,6 +438,9 @@ describe("health and readiness endpoints", () => {
     expect(deviceHtml).toContain("https://auth.openai.com/codex/device");
     expect(deviceHtml).toContain("ABCD-1234");
     expect(deviceHtml).toContain('data-auth-link="chatgpt"');
+    expect(deviceHtml).toContain('data-auth-status="chatgpt-auth-status"');
+    expect(deviceHtml).toContain('aria-describedby="chatgpt-auth-status"');
+    expect(deviceHtml).toContain('id="chatgpt-auth-status"');
     expect(deviceHtml).toContain('id="chatgpt-device-code"');
     expect(deviceHtml).toContain(
       'data-copy-target="chatgpt-device-code"',
@@ -711,6 +714,9 @@ describe("health and readiness endpoints", () => {
     const page = await dashboard.text();
     expect(page).toContain("https://app.photon.codes/device");
     expect(page).toContain('data-auth-link="photon"');
+    expect(page).toContain('data-auth-status="photon-auth-status"');
+    expect(page).toContain('aria-describedby="photon-auth-status"');
+    expect(page).toContain('id="photon-auth-status"');
     expect(page).toContain('id="photon-device-code"');
     expect(page).toContain('data-copy-target="photon-device-code"');
     expect(page).toContain('data-copy-status="photon-copy-status"');

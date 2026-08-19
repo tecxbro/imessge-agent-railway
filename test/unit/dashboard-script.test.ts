@@ -6,6 +6,7 @@ import { renderDashboardScript } from "../../src/http/deployment-page.js";
 
 interface DashboardHarnessOptions {
   clipboardReject?: boolean;
+  openerAssignmentThrows?: boolean;
   provider?: "photon" | "chatgpt";
   photonState?: string;
   popupBlocked?: boolean;
@@ -23,7 +24,10 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
     ): void;
   };
   const authListeners: Array<
-    (event: { currentTarget: { href: string }; preventDefault(): void }) => void
+    (event: {
+      currentTarget: { href: string; dataset: { authStatus: string } };
+      preventDefault(): void;
+    }) => void
   > = [];
   const copyListeners: Array<
     (event: { currentTarget: CopyControl }) => Promise<void> | void
@@ -31,9 +35,10 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
   const scheduled: Array<() => void | Promise<void>> = [];
   const reload = vi.fn();
   const focus = vi.fn();
+  const popupFocus = vi.fn();
   const preventDefault = vi.fn();
-  const replace = vi.fn();
   const stateElement = { textContent: "Waiting for authentication" };
+  const authStatus = { textContent: "" };
   const codeElement = {
     textContent:
       options.userCode ??
@@ -55,11 +60,15 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
       provider === "photon"
         ? "https://app.photon.codes/device"
         : "https://auth.openai.com/codex/device",
+    dataset: { authStatus: `${provider}-auth-status` },
     addEventListener(
       type: string,
       listener: (
         event: {
-          currentTarget: { href: string };
+          currentTarget: {
+            href: string;
+            dataset: { authStatus: string };
+          };
           preventDefault(): void;
         },
       ) => void,
@@ -70,15 +79,28 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
   const popup = {
     closed: false,
     opener: {} as unknown,
-    location: { replace },
     close: vi.fn(),
+    focus: popupFocus,
   };
+  if (options.openerAssignmentThrows === true) {
+    Object.defineProperty(popup, "opener", {
+      configurable: true,
+      get: () => ({}),
+      set: () => {
+        throw new Error("Cross-origin opener access denied");
+      },
+    });
+  }
   popup.close.mockImplementation(() => {
     popup.closed = true;
   });
 
   const windowObject = {
     open: vi.fn(() => (options.popupBlocked === true ? null : popup)),
+    screenX: 100,
+    screenY: 50,
+    outerWidth: 1200,
+    outerHeight: 900,
     location: { reload },
     focus,
     setTimeout: vi.fn((callback: () => void | Promise<void>) => {
@@ -109,6 +131,7 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
       if (id === "photon-state") return stateElement;
       if (id === `${provider}-device-code`) return codeElement;
       if (id === `${provider}-copy-status`) return copyStatus;
+      if (id === `${provider}-auth-status`) return authStatus;
       return null;
     },
     querySelectorAll(selector: string) {
@@ -142,6 +165,7 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
   return {
     authLink,
     authListeners,
+    authStatus,
     codeElement,
     copyButton,
     copyListeners,
@@ -149,9 +173,9 @@ function createDashboardHarness(options: DashboardHarnessOptions = {}) {
     focus,
     fetchImplementation,
     popup,
+    popupFocus,
     preventDefault,
     reload,
-    replace,
     scheduled,
     stateElement,
     windowObject,
@@ -592,7 +616,12 @@ describe("dashboard authentication popup", () => {
 
       expect(harness.preventDefault).toHaveBeenCalledOnce();
       expect(harness.popup.opener).toBeNull();
-      expect(harness.replace).toHaveBeenCalledWith(harness.authLink.href);
+      expect(harness.popupFocus).toHaveBeenCalledOnce();
+      expect(harness.windowObject.open).toHaveBeenCalledWith(
+        harness.authLink.href,
+        "_blank",
+        "popup=yes,width=560,height=760,left=420,top=120,resizable=yes,scrollbars=yes",
+      );
 
       await harness.scheduled.shift()!();
 
@@ -602,7 +631,7 @@ describe("dashboard authentication popup", () => {
     },
   );
 
-  it("keeps the normal external-link fallback when a popup is blocked", () => {
+  it("keeps the dashboard in place and explains when a popup is blocked", () => {
     const harness = createDashboardHarness({ popupBlocked: true });
 
     harness.authListeners[0]!({
@@ -611,7 +640,31 @@ describe("dashboard authentication popup", () => {
     });
 
     expect(harness.windowObject.open).toHaveBeenCalledOnce();
-    expect(harness.preventDefault).not.toHaveBeenCalled();
+    expect(harness.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.authStatus.textContent).toBe(
+      "Pop-up blocked. Allow pop-ups for this site, then try again.",
+    );
+  });
+
+  it("keeps the click canceled when assigning the popup opener fails", () => {
+    const harness = createDashboardHarness({ openerAssignmentThrows: true });
+
+    harness.authListeners[0]!({
+      currentTarget: harness.authLink,
+      preventDefault: harness.preventDefault,
+    });
+
+    expect(harness.preventDefault).toHaveBeenCalledOnce();
+    expect(harness.windowObject.open).toHaveBeenCalledWith(
+      harness.authLink.href,
+      "_blank",
+      expect.stringContaining("width=560,height=760"),
+    );
+    expect(harness.popup.close).not.toHaveBeenCalled();
+  });
+
+  it("does not navigate an about:blank popup after opening it", () => {
+    expect(renderDashboardScript()).not.toContain("popup.location.replace");
   });
 
   it("keeps polling through Photon provisioning without losing the popup", async () => {
