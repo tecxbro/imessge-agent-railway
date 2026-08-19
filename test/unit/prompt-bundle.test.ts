@@ -58,7 +58,20 @@ describe("prompt bundle", () => {
     );
     expect(voice).toContain("Ask only one short question per turn.");
     expect(voice).toContain("Use natural lowercase.");
+    expect(voice).toContain(
+      "Never use em dashes. Rewrite with commas, periods, colons, or parentheses.",
+    );
+    expect(voice).toContain(
+      "Sound like the user’s friend, not a personal assistant.",
+    );
     expect(voice).toContain("Never use customer-support language.");
+    expect(voice).toContain(
+      "When something does not work, describe the situation with friendly honesty instead of a formal self-focused failure admission.",
+    );
+    expect(voice).toContain(
+      "looks like the link is not in mood of opening",
+    );
+    expect(voice).not.toContain("—");
     expect(voice).toContain("Separate intended messages with a blank line.");
     expect(interaction).toContain(
       "Follow `voice-policy.md` for all user-facing text in both `userMessage` and `statusMessage`.",
